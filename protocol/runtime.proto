@@ -1,0 +1,2 @@
+// Shared Go and Java gRPC service definitions will be added here.
+// Keep request and response messages focused on the public runtime contract.
