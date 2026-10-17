@@ -12,27 +12,39 @@ import (
 // Config describes one container launch. RootFS must be an absolute path to a
 // prepared root filesystem. Environment entries use KEY=value form.
 type Config struct {
-	ID        string            `json:"id"`
-	RootFS    string            `json:"rootfs"`
-	Command   []string          `json:"command"`
-	Env       []string          `json:"env,omitempty"`
-	Hostname  string            `json:"hostname,omitempty"`
-	MemoryMax uint64            `json:"memory_max,omitempty"`
-	CPUQuota  uint64            `json:"cpu_quota,omitempty"`
-	CPUPeriod uint64            `json:"cpu_period,omitempty"`
-	Labels    map[string]string `json:"labels,omitempty"`
+	ID        string   `json:"id"`
+	RootFS    string   `json:"rootfs"`
+	Command   []string `json:"command"`
+	Env       []string `json:"env,omitempty"`
+	Hostname  string   `json:"hostname,omitempty"`
+	MemoryMax uint64   `json:"memory_max,omitempty"`
+	CPUQuota  uint64   `json:"cpu_quota,omitempty"`
+	CPUPeriod uint64   `json:"cpu_period,omitempty"`
 }
 
 // Validate rejects incomplete or unsafe-to-interpret launch descriptions.
 func (c Config) Validate() error {
-	if c.ID == "" || strings.ContainsAny(c.ID, "/\\\x00") || c.ID == "." || c.ID == ".." {
-		return errors.New("container id must be a non-empty path-safe value")
+	if c.ID == "" {
+		return errors.New("container id is required")
 	}
-	if c.RootFS == "" || c.RootFS[0] != '/' {
-		return errors.New("rootfs must be an absolute path")
+	for _, char := range c.ID {
+		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' || char == '.') {
+			return errors.New("container id may contain only letters, digits, dot, underscore, and hyphen")
+		}
+	}
+	if c.ID == "." || c.ID == ".." {
+		return errors.New("container id cannot be a dot path")
+	}
+	if c.RootFS == "" || c.RootFS[0] != '/' || c.RootFS == "/" {
+		return errors.New("rootfs must be an absolute non-root path")
 	}
 	if len(c.Command) == 0 || c.Command[0] == "" {
 		return errors.New("command must include an executable")
+	}
+	for _, arg := range c.Command {
+		if strings.ContainsRune(arg, '\x00') {
+			return errors.New("command arguments cannot contain NUL")
+		}
 	}
 	for _, item := range c.Env {
 		key, _, ok := strings.Cut(item, "=")
