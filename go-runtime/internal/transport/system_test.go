@@ -22,6 +22,7 @@ import (
 	"mini-docker/go-runtime/internal/cgroups"
 	"mini-docker/go-runtime/internal/container"
 	"mini-docker/go-runtime/internal/isolation"
+	"mini-docker/go-runtime/internal/network"
 )
 
 func TestMain(m *testing.M) {
@@ -54,7 +55,12 @@ func TestGoRuntimeEndToEnd(t *testing.T) {
 
 	cgroupRoot := filepath.Join(temp, "fake-cgroup")
 	limitsWritten := new(cgroupSnapshot)
-	backend := systemBackend{ChildStarter: isolation.ChildStarter{}, cgroupRoot: cgroupRoot, snapshot: limitsWritten}
+	networkCommands := new(fakeNetworkRunner)
+	backend := systemBackend{
+		ChildStarter: isolation.ChildStarter{Network: network.NewBridgeManagerWithRunner(networkCommands)},
+		cgroupRoot:   cgroupRoot,
+		snapshot:     limitsWritten,
+	}
 	server := grpc.NewServer()
 	RegisterRuntime(server, func(ctx context.Context, config container.Config) error {
 		return container.Run(ctx, config, backend)
@@ -83,6 +89,7 @@ func TestGoRuntimeEndToEnd(t *testing.T) {
 		MemoryMax: 64 << 20,
 		CPUQuota:  50000,
 		CPUPeriod: 100000,
+		Network:   true,
 	}})
 	if err != nil {
 		if strings.Contains(err.Error(), "operation not permitted") {
@@ -96,6 +103,9 @@ func TestGoRuntimeEndToEnd(t *testing.T) {
 
 	if limitsWritten.memoryMax != "67108864" || limitsWritten.cpuMax != "50000 100000" || limitsWritten.pid == "" {
 		t.Fatalf("unexpected cgroup controls: %#v", limitsWritten)
+	}
+	if !strings.Contains(strings.Join(networkCommands.commands, "\n"), "ip route replace default via 10.0.0.1 dev eth0") {
+		t.Fatalf("network setup did not configure a default route: %v", networkCommands.commands)
 	}
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "system-test")); !os.IsNotExist(err) {
 		t.Fatalf("temporary cgroup was not cleaned up: %v", err)
@@ -118,15 +128,15 @@ func TestRuntimeSocketPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	if err := os.Chmod(socket, 0600); err != nil {
+	if err := os.Chmod(socket, 0660); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(socket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatalf("runtime socket permissions are %o, want 600", info.Mode().Perm())
+	if info.Mode().Perm() != 0660 {
+		t.Fatalf("runtime socket permissions are %o, want 660", info.Mode().Perm())
 	}
 }
 
@@ -170,6 +180,23 @@ func (b systemBackend) AttachCgroup(_ context.Context, config container.Config, 
 }
 
 type cgroupSnapshot struct{ memoryMax, cpuMax, pid string }
+
+type fakeNetworkRunner struct {
+	commands     []string
+	bridgeExists bool
+}
+
+func (r *fakeNetworkRunner) Run(_ context.Context, name string, args ...string) error {
+	command := strings.Join(append([]string{name}, args...), " ")
+	r.commands = append(r.commands, command)
+	if command == "ip link show dev minidock0" && !r.bridgeExists {
+		return errors.New("bridge does not exist")
+	}
+	if command == "ip link add name minidock0 type bridge" {
+		r.bridgeExists = true
+	}
+	return nil
+}
 
 func copyFile(source, destination string) error {
 	in, err := os.Open(source)
