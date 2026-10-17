@@ -1,0 +1,18 @@
+#!/bin/sh
+# Minimal project-local Maven launcher; downloads Maven on its first run.
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+MAVEN_VERSION=3.9.9
+MAVEN_HOME="$SCRIPT_DIR/.mvn/wrapper/apache-maven-$MAVEN_VERSION"
+MAVEN_ARCHIVE="$SCRIPT_DIR/.mvn/wrapper/apache-maven-$MAVEN_VERSION-bin.zip"
+
+if [ ! -x "$MAVEN_HOME/bin/mvn" ]; then
+    mkdir -p "$SCRIPT_DIR/.mvn/wrapper"
+    if [ ! -f "$MAVEN_ARCHIVE" ]; then
+        curl -fL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/$MAVEN_VERSION/apache-maven-$MAVEN_VERSION-bin.zip" -o "$MAVEN_ARCHIVE"
+    fi
+    unzip -q -o "$MAVEN_ARCHIVE" -d "$SCRIPT_DIR/.mvn/wrapper"
+fi
+
+exec "$MAVEN_HOME/bin/mvn" -f "$SCRIPT_DIR/pom.xml" "$@"
