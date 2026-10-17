@@ -27,6 +27,7 @@ var namespaceTypes = []string{"pid", "mnt", "net", "uts", "ipc"}
 // namespaces. The child remains blocked until Release is called by Exec.
 type ChildStarter struct {
 	CgroupRoot string
+	Network    *network.BridgeManager
 }
 
 // StartPaused creates the child in fresh PID, mount, network, UTS, and IPC
@@ -40,7 +41,7 @@ func (ChildStarter) StartPaused(ctx context.Context, _ container.Config) (contai
 	cmd := exec.CommandContext(ctx, os.Args[0])
 	cmd.Env = append(os.Environ(), childEnv+"=1")
 	cmd.ExtraFiles = []*os.File{r}
-	cmd.Stdin = nil
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -80,11 +81,16 @@ func (starter ChildStarter) AttachCgroup(_ context.Context, cfg container.Config
 	return nil, nil
 }
 
-// ConfigureNetwork is currently a no-op because loopback is configured inside
-// the child after namespace creation; external veth networking is not part of
-// this low-level runtime boundary yet.
-func (ChildStarter) ConfigureNetwork(_ context.Context, _ container.Config, _ int) (func() error, error) {
-	return nil, nil
+// ConfigureNetwork optionally attaches a host bridge and veth to the paused
+// child before releasing it into its workload.
+func (starter ChildStarter) ConfigureNetwork(ctx context.Context, cfg container.Config, pid int) (func() error, error) {
+	if !cfg.Network {
+		return nil, nil
+	}
+	if starter.Network == nil {
+		return nil, errors.New("container networking was requested but no bridge manager is configured")
+	}
+	return starter.Network.Configure(ctx, cfg.ID, pid)
 }
 
 // Child is the host-side handle for a process blocked in the namespace child
@@ -175,8 +181,12 @@ func RunChild() (int, error) {
 	if len(config.Command) == 0 || config.Command[0] == "" {
 		return 0, errors.New("child configuration has no executable")
 	}
-	if config.Hostname != "" {
-		if err := syscall.Sethostname([]byte(config.Hostname)); err != nil {
+	hostname := config.Hostname
+	if hostname == "" {
+		hostname = config.ID
+	}
+	if hostname != "" {
+		if err := syscall.Sethostname([]byte(hostname)); err != nil {
 			return 1, fmt.Errorf("set container hostname: %w", err)
 		}
 	}
