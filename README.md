@@ -1,8 +1,8 @@
 # Mini Docker
 
-A learning project split into a Go container runtime and a Java control plane.
-Only the two startup entry points contain executable code. Other files are
-project metadata or comments describing where implementation belongs.
+A learning project split into a Go Linux jailer and a Java control plane. Java
+owns the API, image preparation, and container state; Go only applies kernel
+isolation and runs the prepared workload.
 
 ## Project layout
 
@@ -14,7 +14,7 @@ mini-docker/
 │       ├── cgroups/             # Cgroups v2 resource limits
 │       ├── container/           # Container lifecycle and config
 │       ├── isolation/           # PID, mount, network, UTS, IPC namespaces
-│       ├── network/             # veth and bridge setup
+│       ├── network/             # loopback setup in the network namespace
 │       ├── rootfs/              # Root filesystem and pivot_root
 │       └── transport/           # Local control-plane communication
 ├── java-control-plane/          # Spring Boot REST API and lifecycle manager
@@ -25,18 +25,18 @@ mini-docker/
 
 ## Responsibilities
 
-- **Go runtime:** create and stop containers; configure Linux namespaces,
-  cgroups v2, root filesystems, and virtual networking.
+- **Go runtime:** validate a launch request, create Linux namespaces, apply
+  cgroups v2 limits, jail the process in a prepared rootfs, and run it.
 - **Java control plane:** expose the developer API, track container state, and
   call the Go runtime.
-- **Communication:** initial gRPC connection over loopback TCP (`127.0.0.1:50051`).
-  The `protocol/` directory is reserved for the shared contract and generated
-  bindings when lifecycle operations are designed.
+- **Communication:** gRPC over `/tmp/minidock-runtime.sock` (override with
+  `MINIDOCK_SOCKET`), restricted to the daemon's OS user.
 
 ## Development status
 
-This is a runnable scaffold. The Go daemon opens a gRPC server and the Java
-application starts Spring Boot; no container operations are implemented yet.
+The Go runtime runs a synchronous `Run` request through namespaces,
+`pivot_root`, and optional cgroups limits. Java image preparation and the Java
+gRPC client remain to be implemented.
 
 ## Initial setup
 
@@ -46,9 +46,8 @@ application starts Spring Boot; no container operations are implemented yet.
 
 ## Start the services
 
-From `go-runtime/`, run `go run ./cmd/minidockerd` (requires Go 1.22+).
+From `go-runtime/`, run `go run ./cmd/minidockerd` (requires Linux and Go 1.22+).
 From `java-control-plane/`, run `./mvnw spring-boot:run` (requires Java 17+;
-the Maven wrapper downloads Maven on first use). The Go process listens on
-`127.0.0.1:50051`; the Java app uses Spring Boot's default HTTP port.
-The gRPC listener is an empty server scaffold until the protocol and operations
-are added; the Java app does not call it yet.
+the Maven wrapper downloads Maven on first use). The Go process listens on its
+Unix socket; the Java app uses Spring Boot's default HTTP port. The Go `Run`
+RPC is synchronous and the Java app does not call it yet.
