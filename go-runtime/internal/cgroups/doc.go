@@ -1,1 +1,2 @@
-// Cgroups v2 CPU and memory limit setup will live in this package.
+// Package cgroups configures cgroups v2 resource limits.
+package cgroups
