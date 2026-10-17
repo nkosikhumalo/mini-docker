@@ -13,7 +13,10 @@ import (
 	"strings"
 	"syscall"
 
+	"mini-docker/go-runtime/internal/cgroups"
 	"mini-docker/go-runtime/internal/container"
+	"mini-docker/go-runtime/internal/network"
+	"mini-docker/go-runtime/internal/rootfs"
 )
 
 const childEnv = "MINIDOCK_INTERNAL_CHILD"
@@ -22,12 +25,14 @@ var namespaceTypes = []string{"pid", "mnt", "net", "uts", "ipc"}
 
 // ChildStarter re-executes the current binary with a fresh set of Linux
 // namespaces. The child remains blocked until Release is called by Exec.
-type ChildStarter struct{}
+type ChildStarter struct {
+	CgroupRoot string
+}
 
 // StartPaused creates the child in fresh PID, mount, network, UTS, and IPC
 // namespaces. It does not require a privileged command; Linux permissions
 // determine whether the kernel permits these namespaces for this caller.
-func (ChildStarter) StartPaused(ctx context.Context, _ container.Config) (*Child, error) {
+func (ChildStarter) StartPaused(ctx context.Context, _ container.Config) (container.Child, error) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("create child release pipe: %w", err)
@@ -57,6 +62,29 @@ func (ChildStarter) StartPaused(ctx context.Context, _ container.Config) (*Child
 		return nil, err
 	}
 	return child, nil
+}
+
+// AttachCgroup applies requested resource limits in cgroups v2. With no
+// limits, it avoids creating an unnecessary group.
+func (starter ChildStarter) AttachCgroup(_ context.Context, cfg container.Config, pid int) (func() error, error) {
+	if cfg.MemoryMax != 0 || cfg.CPUQuota != 0 {
+		root := starter.CgroupRoot
+		if root == "" {
+			root = os.Getenv("MINIDOCK_CGROUP_ROOT")
+		}
+		if root == "" {
+			root = "/sys/fs/cgroup/minidock"
+		}
+		return cgroups.Attach(root, cfg.ID, cgroups.Limits{MemoryMax: cfg.MemoryMax, CPUQuota: cfg.CPUQuota, CPUPeriod: cfg.CPUPeriod}, pid)
+	}
+	return nil, nil
+}
+
+// ConfigureNetwork is currently a no-op because loopback is configured inside
+// the child after namespace creation; external veth networking is not part of
+// this low-level runtime boundary yet.
+func (ChildStarter) ConfigureNetwork(_ context.Context, _ container.Config, _ int) (func() error, error) {
+	return nil, nil
 }
 
 // Child is the host-side handle for a process blocked in the namespace child
@@ -146,6 +174,19 @@ func RunChild() (int, error) {
 	}
 	if len(config.Command) == 0 || config.Command[0] == "" {
 		return 0, errors.New("child configuration has no executable")
+	}
+	if config.Hostname != "" {
+		if err := syscall.Sethostname([]byte(config.Hostname)); err != nil {
+			return 1, fmt.Errorf("set container hostname: %w", err)
+		}
+	}
+	if err := network.BringLoopbackUp(); err != nil {
+		return 1, fmt.Errorf("configure loopback in network namespace: %w", err)
+	}
+	if config.RootFS != "" {
+		if err := rootfs.Enter(config.RootFS); err != nil {
+			return 1, fmt.Errorf("enter container rootfs: %w", err)
+		}
 	}
 	path, err := exec.LookPath(config.Command[0])
 	if err != nil {
