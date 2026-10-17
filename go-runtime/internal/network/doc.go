@@ -1,1 +1,2 @@
-// Container veth pair and bridge setup will live in this package.
+// Package network configures container network interfaces.
+package network
