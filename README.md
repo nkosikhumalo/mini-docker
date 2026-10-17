@@ -9,7 +9,7 @@ isolation and runs the prepared workload.
 ```text
 mini-docker/
 ├── go-runtime/                 # Linux container runtime (Go)
-│   ├── cmd/minidockerd/         # Runnable gRPC daemon entry point
+│   ├── cmd/minidockd/           # Runnable gRPC daemon entry point
 │   └── internal/
 │       ├── cgroups/             # Cgroups v2 resource limits
 │       ├── container/           # Container lifecycle and config
@@ -46,7 +46,7 @@ gRPC client remain to be implemented.
 
 ## Start the services
 
-From `go-runtime/`, run `go run ./cmd/minidockerd` (requires Linux and Go 1.22+).
+From `go-runtime/`, run `go run ./cmd/minidockd` (requires Linux and Go 1.22+).
 From `java-control-plane/`, run `./mvnw spring-boot:run` (requires Java 17+;
 the Maven wrapper downloads Maven on first use). The Go process listens on its
 Unix socket; the Java app uses Spring Boot's default HTTP port. The Go `Run`
