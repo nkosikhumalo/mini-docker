@@ -1,0 +1,7 @@
+# Go build output and local caches
+/go-runtime/bin/
+**/*.test
+
+# Maven output and the project-local Maven distribution downloaded by mvnw
+/java-control-plane/target/
+/java-control-plane/.mvn/wrapper/apache-maven-*
