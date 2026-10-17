@@ -1,1 +1,2 @@
-// The gRPC service registration and runtime transport helpers will live here.
+// Package transport provides the runtime's control-plane transport.
+package transport
