@@ -1,18 +1,21 @@
-// minidockerd starts the local gRPC endpoint for the Go runtime.
-// Container operations will be registered after the shared protocol is defined.
+// minidockerd serves container lifecycle operations over a local gRPC socket.
 package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"mini-docker/go-runtime/internal/container"
 	"mini-docker/go-runtime/internal/isolation"
+	"mini-docker/go-runtime/internal/transport"
 )
 
 func main() {
@@ -23,49 +26,55 @@ func main() {
 		}
 		os.Exit(status)
 	}
-	if len(os.Args) == 2 && os.Args[1] == "namespace-check" {
-		if err := namespaceCheck(); err != nil {
-			log.Fatalf("namespace check: %v", err)
-		}
-		return
+	socket := os.Getenv("MINIDOCK_SOCKET")
+	if socket == "" {
+		socket = "/tmp/minidock-runtime.sock"
 	}
-
-	listener, err := net.Listen("tcp", "127.0.0.1:50051")
+	if !filepath.IsAbs(socket) {
+		log.Fatalf("runtime socket path must be absolute: %s", socket)
+	}
+	if info, err := os.Lstat(socket); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			log.Fatalf("refusing to replace non-socket path %s", socket)
+		}
+		if connection, dialErr := net.DialTimeout("unix", socket, time.Second); dialErr == nil {
+			_ = connection.Close()
+			log.Fatalf("another runtime is already listening on %s", socket)
+		}
+		if err := os.Remove(socket); err != nil {
+			log.Fatalf("remove stale runtime socket: %v", err)
+		}
+	} else if !os.IsNotExist(err) {
+		log.Fatalf("inspect runtime socket path: %v", err)
+	}
+	listener, err := net.Listen("unix", socket)
 	if err != nil {
-		log.Fatalf("listen for runtime gRPC: %v", err)
+		log.Fatalf("listen for runtime gRPC socket: %v", err)
+	}
+	defer os.Remove(socket)
+	if err := os.Chmod(socket, 0600); err != nil {
+		log.Fatalf("restrict runtime socket permissions: %v", err)
 	}
 
 	server := grpc.NewServer()
+	transport.RegisterRuntime(server, func(ctx context.Context, cfg container.Config) error {
+		return container.Run(ctx, cfg, isolation.ChildStarter{})
+	})
 	stopped := make(chan os.Signal, 1)
+	shutdownDone := make(chan struct{})
 	signal.Notify(stopped, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-stopped
-		server.GracefulStop()
+		server.Stop()
+		close(shutdownDone)
 	}()
 
-	log.Printf("Go runtime gRPC endpoint listening on %s", listener.Addr())
+	log.Printf("Low-level container runtime ready on unix://%s", socket)
 	if err := server.Serve(listener); err != nil {
+		if errors.Is(err, grpc.ErrServerStopped) {
+			<-shutdownDone
+			return
+		}
 		log.Fatalf("serve runtime gRPC: %v", err)
 	}
-}
-
-// namespaceCheck is a safe smoke command: it starts only a shell that prints
-// namespace handles, without mounting a rootfs or changing host networking.
-func namespaceCheck() error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cfg := container.Config{
-		ID:      "namespace-check",
-		RootFS:  "/",
-		Command: []string{"/bin/sh", "-c", "for ns in pid mnt net uts ipc; do printf '%s=' \"$ns\"; readlink /proc/self/ns/$ns; done"},
-	}
-	child, err := (isolation.ChildStarter{}).StartPaused(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer child.Close()
-	if err := child.Exec(ctx, cfg); err != nil {
-		return err
-	}
-	return child.Wait()
 }
