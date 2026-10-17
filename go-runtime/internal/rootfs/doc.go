@@ -1,1 +1,2 @@
-// Container root filesystem preparation and pivot_root will live in this package.
+// Package rootfs prepares and enters a container root filesystem.
+package rootfs
