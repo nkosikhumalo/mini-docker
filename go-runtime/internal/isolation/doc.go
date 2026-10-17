@@ -1,1 +1,3 @@
-// Linux namespace setup for containers will live in this package.
+// Package isolation creates and manages Linux namespaces for container
+// processes.
+package isolation
