@@ -1,6 +1,9 @@
 # Runtime protocol
 
-The shared service contract will live here if gRPC is selected (for example,
-Protocol Buffer definitions). If a Unix domain socket is selected, document
-the request and response format here instead. Keep this contract independent
-from the Go and Java implementation packages.
+The Go jailer exposes gRPC over a Unix domain socket with gRPC's JSON content
+subtype. `minidock.runtime.v1.RuntimeService/Run` accepts a prepared rootfs
+path, command, environment, hostname, and optional CPU and memory limits. The
+call blocks until the workload exits; canceling the RPC stops it. The request
+and response types are in `go-runtime/internal/transport/runtime_linux.go`.
+`runtime.proto` is reserved for a future protobuf wire contract and is not used
+by the current JSON transport. The Java gRPC client remains to be connected.
