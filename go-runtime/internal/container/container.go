@@ -20,6 +20,7 @@ type Config struct {
 	MemoryMax uint64   `json:"memory_max,omitempty"`
 	CPUQuota  uint64   `json:"cpu_quota,omitempty"`
 	CPUPeriod uint64   `json:"cpu_period,omitempty"`
+	Network   bool     `json:"network,omitempty"`
 }
 
 // Validate rejects incomplete or unsafe-to-interpret launch descriptions.
@@ -34,6 +35,12 @@ func (c Config) Validate() error {
 	}
 	if c.ID == "." || c.ID == ".." {
 		return errors.New("container id cannot be a dot path")
+	}
+	if len(c.ID) > 64 {
+		return errors.New("container id cannot exceed the Linux hostname limit of 64 bytes")
+	}
+	if len(c.Hostname) > 64 || strings.ContainsRune(c.Hostname, '\x00') {
+		return errors.New("hostname cannot exceed 64 bytes or contain NUL")
 	}
 	if c.RootFS == "" || c.RootFS[0] != '/' || c.RootFS == "/" {
 		return errors.New("rootfs must be an absolute non-root path")
