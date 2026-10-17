@@ -1,2 +1,2 @@
-// Shared Go and Java gRPC service definitions will be added here.
-// Keep request and response messages focused on the public runtime contract.
+// Reserved for a future shared protobuf contract. The current runtime uses
+// JSON gRPC messages documented in protocol/README.md.
