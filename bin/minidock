@@ -9,12 +9,12 @@ usage() {
 Usage:
   minidock build -t NAME IMAGE.tar[.gz]
   minidock images
-  minidock run [-m MEMORY] [-c CPU] [--network|--no-network] IMAGE COMMAND [ARG...]
+  minidock run [-m MEMORY] [-c CPU] [-d|--detach] [--network|--no-network] IMAGE COMMAND [ARG...]
   minidock ps
   minidock stop CONTAINER_ID
 
 CPU accepts a percentage (50) or CPU count (0.5).
-run starts a container and prints its ID/PID; terminal attachment is not supported yet.
+run attaches stdin/stdout when interactive; use -d to run in the background.
 EOF
   exit 2
 }
@@ -39,10 +39,16 @@ case "$command_name" in
     memory=
     cpu=
     network_enabled=true
+    attach=true
+    tty=false
     while (($#)); do
       case "$1" in
         -m|--memory) (($# >= 2)) || usage; memory=$2; shift 2 ;;
         -c|--cpu) (($# >= 2)) || usage; cpu=$2; shift 2 ;;
+        -d|--detach) attach=false; tty=false; shift ;;
+        -i|--interactive) attach=true; shift ;;
+        -t|--tty) attach=true; tty=true; shift ;;
+        -it|-ti) attach=true; tty=true; shift ;;
         --network) network_enabled=true; shift ;;
         --no-network|--network=none) network_enabled=false; shift ;;
         --) shift; break ;;
@@ -54,8 +60,21 @@ case "$command_name" in
     image=$1
     shift
     if [[ $cpu =~ ^[1-9][0-9]?$ ]]; then cpu="${cpu}%"; fi
-    payload=$(python3 -c 'import json,sys; image,memory,cpu,network=sys.argv[1:5]; command=sys.argv[5:]; print(json.dumps({"image":image,"command":command,"memory_limit":memory or None,"cpu_limit":cpu or None,"network":network == "true"}))' "$image" "$memory" "$cpu" "$network_enabled" "$@")
-    curl --fail-with-body -sS -H 'Content-Type: application/json' -d "$payload" "$api/api/v1/containers"
+    payload=$(python3 -c 'import json,sys; image,memory,cpu,network,attach,tty=sys.argv[1:7]; command=sys.argv[7:]; print(json.dumps({"image":image,"command":command,"memory_limit":memory or None,"cpu_limit":cpu or None,"network":network == "true","attach":attach == "true","tty":tty == "true"}))' "$image" "$memory" "$cpu" "$network_enabled" "$attach" "$tty" "$@")
+    response=$(curl --fail-with-body -sS -H 'Content-Type: application/json' -d "$payload" "$api/api/v1/containers")
+    if [[ $attach == false ]]; then
+      printf '%s\n' "$response"
+    else
+      id=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$response")
+      pid=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("pid") or "?")' <<<"$response")
+      printf 'Started %s (pid %s)\n' "$id" "$pid"
+      repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+      if [[ -x $repo/bin/minidock-attach ]]; then
+        MINIDOCK_SOCKET=${MINIDOCK_SOCKET:-/tmp/minidock-runtime.sock} "$repo/bin/minidock-attach" attach "$id"
+      else
+        (cd "$repo/go-runtime" && MINIDOCK_SOCKET=${MINIDOCK_SOCKET:-/tmp/minidock-runtime.sock} go run ./cmd/minidock attach "$id")
+      fi
+    fi
     ;;
   ps)
     [[ $# -eq 0 ]] || usage
