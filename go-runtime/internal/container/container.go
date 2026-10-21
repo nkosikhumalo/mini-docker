@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 )
@@ -23,6 +24,8 @@ type Config struct {
 	CPUPeriod uint64   `json:"cpu_period,omitempty"`
 	Network   bool     `json:"network,omitempty"`
 	NetworkIP string   `json:"network_ip,omitempty"`
+	Attach    bool     `json:"attach,omitempty"`
+	TTY       bool     `json:"tty,omitempty"`
 }
 
 // Validate rejects incomplete or unsafe-to-interpret launch descriptions.
@@ -73,6 +76,9 @@ func (c Config) Validate() error {
 			return errors.New("network_ip must be an available address in 10.0.0.2/24 through 10.0.0.254/24")
 		}
 	}
+	if c.TTY && !c.Attach {
+		return errors.New("tty requires attach mode")
+	}
 	return nil
 }
 
@@ -80,9 +86,23 @@ func (c Config) Validate() error {
 // paused lets the host attach cgroups and configure networking first.
 type Child interface {
 	PID() int
+	Stdin() io.WriteCloser
+	Stdout() io.ReadCloser
+	Stderr() io.ReadCloser
+	Resize(columns, rows uint16) error
 	Exec(context.Context, Config) error
 	Wait() error
 	Close() error
+}
+
+// StartedProcess exposes the process identity and optional attached streams
+// once the child is ready to exec its workload.
+type StartedProcess struct {
+	PID    int
+	Stdin  io.WriteCloser
+	Stdout io.ReadCloser
+	Stderr io.ReadCloser
+	Resize func(columns, rows uint16) error
 }
 
 // Backend isolates Linux-specific mechanisms from lifecycle coordination.
@@ -102,7 +122,7 @@ func Run(ctx context.Context, cfg Config, backend Backend) (runErr error) {
 // RunStarted runs a container and calls started after kernel setup has
 // completed and the workload has been released. This lets the daemon return
 // the host PID before waiting for the container's eventual exit.
-func RunStarted(ctx context.Context, cfg Config, backend Backend, started func(int)) (runErr error) {
+func RunStarted(ctx context.Context, cfg Config, backend Backend, started func(StartedProcess)) (runErr error) {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -137,7 +157,7 @@ func RunStarted(ctx context.Context, cfg Config, backend Backend, started func(i
 		return fmt.Errorf("execute container workload: %w", err)
 	}
 	if started != nil {
-		started(child.PID())
+		started(StartedProcess{PID: child.PID(), Stdin: child.Stdin(), Stdout: child.Stdout(), Stderr: child.Stderr(), Resize: child.Resize})
 	}
 	if err := child.Wait(); err != nil {
 		return fmt.Errorf("wait for container workload: %w", err)
