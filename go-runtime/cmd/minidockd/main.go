@@ -59,14 +59,15 @@ func main() {
 
 	server := grpc.NewServer()
 	networkManager := network.NewBridgeManager()
-	transport.RegisterRuntime(server, func(ctx context.Context, cfg container.Config) error {
-		return container.Run(ctx, cfg, isolation.ChildStarter{Network: networkManager})
+	shutdownRuntime := transport.RegisterManagedRuntime(server, func(ctx context.Context, cfg container.Config, started func(int)) error {
+		return container.RunStarted(ctx, cfg, isolation.ChildStarter{Network: networkManager}, started)
 	})
 	stopped := make(chan os.Signal, 1)
 	shutdownDone := make(chan struct{})
 	signal.Notify(stopped, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-stopped
+		shutdownRuntime()
 		server.Stop()
 		close(shutdownDone)
 	}()
