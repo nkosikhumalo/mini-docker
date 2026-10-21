@@ -35,15 +35,16 @@ defaults to `/tmp/minidock-runtime.sock` and has mode `0660`. Override it with
 ```sh
 bin/minidock build -t alpine-base alpine-minirootfs.tar.gz
 bin/minidock images
-bin/minidock run -m 256M -c 50 alpine-base /bin/sh -c 'echo hello'
+bin/minidock run -it -m 256M -c 50 alpine-base /bin/sh
+bin/minidock run -d --no-network alpine-base /bin/sh -c 'echo hello'
 bin/minidock ps
 bin/minidock stop CONTAINER_ID
 ```
 
 `build` stages an existing `.tar` or `.tar.gz` rootfs archive; it does not
 build a Dockerfile. `run` returns after Go confirms startup and reports the
-container ID and host PID. It currently runs detached and does not forward the
-caller's terminal input/output. Java exposes the same operations through
+container ID and host PID. Attached runs connect the caller's terminal to a
+container PTY, including terminal resize and exit-code forwarding. Java exposes the same operations through
 `/api/v1/images` and `/api/v1/containers`.
 
 ## Storage and host requirements
@@ -56,9 +57,10 @@ keeps lifecycle records in memory; they reset when Java restarts.
 The Go runtime requires Linux. Namespace creation and mounts depend on host
 kernel policy. CPU and memory limits require a writable delegated cgroups v2
 hierarchy; set `MINIDOCK_CGROUP_ROOT` to its MiniDock subdirectory. Container
-networking requires `iproute2`, `nsenter`, and permission to create bridge and
-veth devices. MiniDock configures the bridge and default route, while host
-forwarding/NAT for external network access must be configured separately.
+networking requires `iproute2`, `nsenter`, `iptables`, and permission to create
+bridge/veth devices and change IPv4 forwarding. MiniDock adds masquerade and
+forwarding rules for `10.0.0.0/24`, then removes its rules and restores the
+previous forwarding setting on normal daemon shutdown.
 
 The Java-to-Go contract is protobuf gRPC over the local Unix socket. Go's
 `Start`, `Wait`, and `Stop` operations let Java acknowledge startup with a PID,
