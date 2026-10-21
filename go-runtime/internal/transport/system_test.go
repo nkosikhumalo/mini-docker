@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	runtimev1 "mini-docker/go-runtime/gen/runtime/v1"
 	"mini-docker/go-runtime/internal/cgroups"
 	"mini-docker/go-runtime/internal/container"
 	"mini-docker/go-runtime/internal/isolation"
@@ -82,15 +83,15 @@ func TestGoRuntimeEndToEnd(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	response, err := NewRuntimeClient(conn).Run(ctx, &RunRequest{Config: container.Config{
-		ID:        "system-test",
-		RootFS:    rootfs,
+	response, err := NewRuntimeClient(conn).Run(ctx, &runtimev1.RunRequest{
+		Id:        "system-test",
+		Rootfs:    rootfs,
 		Command:   []string{"/bin/busybox", "sh", "-c", "test ! -e /etc/passwd"},
 		MemoryMax: 64 << 20,
-		CPUQuota:  50000,
-		CPUPeriod: 100000,
+		CpuQuota:  50000,
+		CpuPeriod: 100000,
 		Network:   true,
-	}})
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "operation not permitted") {
 			t.Skipf("kernel policy blocks required namespaces or mounts: %v", err)
@@ -137,6 +138,55 @@ func TestRuntimeSocketPermissions(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0660 {
 		t.Fatalf("runtime socket permissions are %o, want 660", info.Mode().Perm())
+	}
+}
+
+func TestManagedStartWaitStopLifecycle(t *testing.T) {
+	server := grpc.NewServer()
+	workloadDone := make(chan struct{})
+	RegisterManagedRuntime(server, func(ctx context.Context, _ container.Config, started func(int)) error {
+		started(4242)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-workloadDone:
+			return nil
+		}
+	})
+	listener := bufconn.Listen(1 << 20)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = listener.Close(); server.Stop() })
+	conn, err := grpc.DialContext(context.Background(), "managed-test",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	client := NewRuntimeClient(conn)
+	request := &runtimev1.RunRequest{Id: "managed-test", Rootfs: "/tmp/minidock-test-root", Command: []string{"/bin/true"}}
+	started, err := client.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.GetPid() != 4242 {
+		t.Fatalf("start returned pid %d, want 4242", started.GetPid())
+	}
+	waited := make(chan error, 1)
+	go func() {
+		_, err := client.Wait(context.Background(), &runtimev1.WaitRequest{Id: request.GetId()})
+		waited <- err
+	}()
+	if _, err := client.Stop(context.Background(), &runtimev1.StopRequest{Id: request.GetId()}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatalf("wait after stop: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("wait did not finish after stop")
 	}
 }
 
