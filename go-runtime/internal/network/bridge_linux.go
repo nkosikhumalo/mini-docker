@@ -68,6 +68,12 @@ func NewBridgeManagerWithRunner(runner CommandRunner) *BridgeManager {
 // Configure ensures the bridge exists, attaches a veth to the isolated
 // network namespace identified by pid, and returns cleanup for the veth/IP lease.
 func (m *BridgeManager) Configure(ctx context.Context, id string, pid int) (func() error, error) {
+	return m.ConfigureWithIP(ctx, id, pid, "")
+}
+
+// ConfigureWithIP reserves the requested address when supplied. An empty
+// address asks the manager to allocate one from its default subnet.
+func (m *BridgeManager) ConfigureWithIP(ctx context.Context, id string, pid int, requestedIP string) (func() error, error) {
 	if id == "" || pid <= 0 {
 		return nil, errors.New("network setup requires a container ID and positive pid")
 	}
@@ -76,7 +82,13 @@ func (m *BridgeManager) Configure(ctx context.Context, id string, pid int) (func
 	if _, exists := m.leases[id]; exists {
 		return nil, fmt.Errorf("container %q already has a network lease", id)
 	}
-	ipv4, err := m.allocateIP()
+	var ipv4 string
+	var err error
+	if requestedIP == "" {
+		ipv4, err = m.allocateIP()
+	} else {
+		ipv4, err = m.reserveIP(requestedIP)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -179,6 +191,19 @@ func (m *BridgeManager) allocateIP() (string, error) {
 		}
 	}
 	return "", errors.New("default bridge subnet has no free container addresses")
+}
+
+func (m *BridgeManager) reserveIP(address string) (string, error) {
+	ip := net.ParseIP(address).To4()
+	if ip == nil || ip[0] != 10 || ip[1] != 0 || ip[2] != 0 || ip[3] < 2 || ip[3] > 254 {
+		return "", fmt.Errorf("requested IP %q is outside the MiniDock bridge subnet", address)
+	}
+	canonical := ip.String()
+	if m.usedIPv4[canonical] {
+		return "", fmt.Errorf("requested IP %s is already allocated", canonical)
+	}
+	m.usedIPv4[canonical] = true
+	return canonical, nil
 }
 
 func interfaceNames(id string) (string, string) {
