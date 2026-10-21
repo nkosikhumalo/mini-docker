@@ -85,7 +85,9 @@ public class ContainerService {
                     validated.cpuQuota(),
                     validated.cpuPeriod(),
                     validated.network(),
-                    networkIp);
+                    networkIp,
+                    validated.attach(),
+                    validated.tty());
             RuntimeGateway.Execution execution = runtime.run(config);
             if (record.start(execution)) {
                 execution.completion().whenComplete((result, failure) -> {
@@ -154,6 +156,9 @@ public class ContainerService {
         if (request.hostname() != null && (request.hostname().length() > 64 || request.hostname().indexOf('\0') >= 0)) {
             throw new IllegalArgumentException("hostname cannot exceed 64 characters or contain NUL");
         }
+        boolean attach = Boolean.TRUE.equals(request.attach());
+        boolean tty = Boolean.TRUE.equals(request.tty());
+        if (tty && !attach) throw new IllegalArgumentException("tty requires attach mode");
         List<String> environment = new ArrayList<>();
         if (request.environment() != null) {
             for (Map.Entry<String, String> item : request.environment().entrySet()) {
@@ -164,11 +169,15 @@ public class ContainerService {
                 environment.add(item.getKey() + "=" + item.getValue());
             }
         }
+        Map<String, String> suppliedEnvironment = request.environment() == null ? Map.of() : request.environment();
+        if (!suppliedEnvironment.containsKey("PATH")) environment.add(0, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        if (!suppliedEnvironment.containsKey("HOME")) environment.add("HOME=/root");
+        if (tty && !suppliedEnvironment.containsKey("TERM")) environment.add("TERM=xterm-256color");
         long memoryMax = parseMemory(request.memoryLimit());
         long cpuQuota = parseCPUQuota(request.cpuLimit());
         return new ValidatedRequest(request.image(), List.copyOf(request.command()), List.copyOf(environment),
                 request.hostname(), memoryMax, cpuQuota, cpuQuota == 0 ? 0 : CPU_PERIOD,
-                request.network() == null || request.network());
+                request.network() == null || request.network(), attach, tty);
     }
 
     private static long parseMemory(String input) {
@@ -224,5 +233,5 @@ public class ContainerService {
 
     private record ValidatedRequest(String image, List<String> command, List<String> environment,
                                     String hostname, long memoryMax, long cpuQuota, long cpuPeriod,
-                                    boolean network) {}
+                                    boolean network, boolean attach, boolean tty) {}
 }
