@@ -1,58 +1,48 @@
 # MiniDock Go runtime
 
-Go is the low-level Linux jailer. Java owns the REST API, image extraction,
-container registry, and lifecycle state. The Go runtime keeps no container
-registry and does not extract image archives.
+Go is the Linux jailer. Java owns the HTTP API, image storage/extraction, and
+container registry. The runtime receives prepared rootfs paths over a local
+protobuf gRPC Unix socket and manages only active kernel processes.
 
-## Request flow
+## Runtime protocol
 
-The Java control plane calls the `Run` method on
-`minidock.runtime.v1.RuntimeService` over the Unix socket
-`/tmp/minidock-runtime.sock` (override with `MINIDOCK_SOCKET`). The socket is
-created with mode `0660`. Messages use gRPC's JSON content subtype; the request
-contains a prepared absolute `rootfs` path, command, environment, hostname,
-optional CPU and memory limits, and an optional `network` flag. The RPC waits
-for the workload to exit. Its
-context cancellation kills the child process, and the response carries the
-exit code. `protocol/runtime.proto` is reserved for a future protobuf wire
-contract and is not used by this JSON transport yet.
+The daemon listens on `/tmp/minidock-runtime.sock` (override with
+`MINIDOCK_SOCKET`) and creates the socket with mode `0660`. `Start` validates a
+request, prepares namespaces/cgroups/network/rootfs, and returns the host PID
+once child setup is acknowledged. `Wait` returns the process exit code and
+`Stop` cancels it. On daemon shutdown, active child processes are canceled and
+waited for before the socket server exits.
 
 ## Kernel path
 
-1. `container` validates the request and coordinates setup and cleanup.
-2. `isolation` re-executes the runtime binary with new user, PID, mount,
-   network, UTS, and IPC namespaces. The child waits while the parent applies
-   requested resource limits.
-3. `cgroups` creates a cgroups v2 group, writes `memory.max` and/or `cpu.max`,
-   then writes the child PID to `cgroup.procs`. The group is removed when the
-   workload exits. Set `MINIDOCK_CGROUP_ROOT` to use a delegated cgroup root;
-   the default is `/sys/fs/cgroup/minidock`.
-4. When `network` is requested, the host manager creates `minidock0` at
-   `10.0.0.1/24`, allocates a container address, and connects a veth to the
-   child namespace. This requires `ip`, `nsenter`, and host `CAP_NET_ADMIN`.
-   The child brings loopback up through a Linux ioctl, enters the prepared
-   rootfs with a private mount tree, mounts `/proc` for its PID namespace,
-   calls `pivot_root`, detaches the old root, then replaces itself with the
-   requested command. A denied `/proc` mount fails container startup.
+1. `container` validates configuration and orders setup/cleanup.
+2. `isolation` re-executes the runtime in new user, PID, mount, network, UTS,
+   and IPC namespaces. The parent holds the child while applying cgroups and
+   optional networking.
+3. `cgroups` writes requested memory/CPU controls and registers the child PID.
+   Configure a delegated cgroups v2 subtree with `MINIDOCK_CGROUP_ROOT`.
+4. `network` creates `minidock0` at `10.0.0.1/24`, assigns a container IP,
+   attaches a veth, and configures the container default route. This requires
+   `ip`, `nsenter`, and `CAP_NET_ADMIN`. Host forwarding and NAT are not
+   installed automatically.
+5. The namespace child brings loopback up, bind-mounts rootfs, mounts `/proc`,
+   calls `pivot_root`, detaches the old root, acknowledges setup, and execs the
+   command. A failed `/proc` mount fails startup.
 
-The rootfs must already be safely prepared by Java. Go does not unpack images
-or manage container state. Networking is opt-in per request and provides a
-bridge, veth, container address, and default route; host forwarding and NAT are
-not configured. The runtime requires permission to mount `/proc`; setup errors
-fail the launch instead of starting a container with an incomplete process
-filesystem.
+The runtime does not extract images, persist state, or yet relay an attached
+caller terminal over the socket. Child stdio inherits the daemon's streams.
+Kernel capabilities and cgroup delegation must be provisioned by the host.
 
-## Packages
+## Packages and verification
 
-- `cmd/minidockd`: local gRPC socket and hidden child-process entry point.
-- `internal/transport`: the stateless Java-to-Go `Run` handshake.
-- `internal/container`: launch config validation and ordered lifecycle.
-- `internal/isolation`: namespace creation and re-exec handshake.
-- `internal/rootfs`: `pivot_root` and `/proc` setup.
-- `internal/cgroups`: cgroups v2 resource limits.
-- `internal/network`: loopback and optional host bridge/veth setup.
+- `cmd/minidockd`: gRPC socket and namespace child entry point.
+- `internal/transport`: Java-to-Go RPC boundary and session handling.
+- `internal/container`: configuration validation and lifecycle.
+- `internal/isolation`: namespaces and re-exec handshake.
+- `internal/rootfs`: procfs and `pivot_root` setup.
+- `internal/cgroups`: cgroups v2 limits.
+- `internal/network`: loopback and bridge/veth management.
 
-Run the end-to-end Go test and package checks from this directory with
-`go test ./...` and `go vet ./...`. The integration test needs Linux user,
-PID, mount, and network namespaces plus `busybox`; it skips when `busybox` is
-not installed or rootless namespace creation is prohibited.
+Run `go test ./...` and `go vet ./...` from this directory. The kernel test
+needs Linux namespace/mount permission and `busybox`; it skips when the host
+does not permit those operations.
