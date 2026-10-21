@@ -57,6 +57,8 @@ public class GoRuntimeGateway implements RuntimeGateway {
                 .setCpuPeriod(config.cpuPeriod())
                 .setNetwork(config.network())
                 .setNetworkIp(config.networkIp())
+                .setAttach(config.attach())
+                .setTty(config.tty())
                 .build();
         StartResponse started;
         try {
