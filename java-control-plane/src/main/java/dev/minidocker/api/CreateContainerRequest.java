@@ -12,5 +12,7 @@ public record CreateContainerRequest(
         @JsonProperty("cpu_limit") String cpuLimit,
         Map<String, String> environment,
         String hostname,
-        Boolean network) {
+        Boolean network,
+        Boolean attach,
+        Boolean tty) {
 }
