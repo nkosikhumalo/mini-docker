@@ -1,53 +1,65 @@
 # Mini Docker
 
-A learning project split into a Go Linux jailer and a Java control plane. Java
-owns the API, image preparation, and container state; Go only applies kernel
-isolation and runs the prepared workload.
-
-## Project layout
-
-```text
-mini-docker/
-├── go-runtime/                 # Linux container runtime (Go)
-│   ├── cmd/minidockd/           # Runnable gRPC daemon entry point
-│   └── internal/
-│       ├── cgroups/             # Cgroups v2 resource limits
-│       ├── container/           # Container lifecycle and config
-│       ├── isolation/           # PID, mount, network, UTS, IPC namespaces
-│       ├── network/             # loopback setup in the network namespace
-│       ├── rootfs/              # Root filesystem and pivot_root
-│       └── transport/           # Local control-plane communication
-├── java-control-plane/          # Spring Boot REST API and lifecycle manager
-│   └── src/main/java/           # Application packages
-├── protocol/                    # Shared gRPC contract, when introduced
-└── README.md
-```
-
-## Responsibilities
-
-- **Go runtime:** validate a launch request, create Linux namespaces, apply
-  cgroups v2 limits, jail the process in a prepared rootfs, and run it.
-- **Java control plane:** expose the developer API, track container state, and
-  call the Go runtime.
-- **Communication:** gRPC over `/tmp/minidock-runtime.sock` (override with
-  `MINIDOCK_SOCKET`), restricted to the daemon's OS user.
-
-## Development status
-
-The Go runtime runs a synchronous `Run` request through namespaces,
-`pivot_root`, and optional cgroups limits. Java image preparation and the Java
-gRPC client remain to be implemented.
-
-## Initial setup
-
-- Go module metadata is in `go-runtime/go.mod`.
-- Java Maven metadata is in `java-control-plane/pom.xml`.
-- Linux-only runtime behavior should be kept behind the Go runtime boundary.
+A Linux learning project split into a Java control plane and a Go runtime.
+Java validates requests, stages images, extracts root filesystems and tracks
+container state. Go creates namespaces, configures cgroups and networking,
+enters the rootfs with `pivot_root`, and executes workloads.
 
 ## Start the services
 
-From `go-runtime/`, run `go run ./cmd/minidockd` (requires Linux and Go 1.22+).
-From `java-control-plane/`, run `./mvnw spring-boot:run` (requires Java 17+;
-the Maven wrapper downloads Maven on first use). The Go process listens on its
-Unix socket; the Java app uses Spring Boot's default HTTP port. The Go `Run`
-RPC is synchronous and the Java app does not call it yet.
+Run both processes on the same Linux machine and as users that can access the
+same Unix socket:
+
+In terminal one:
+
+```sh
+cd go-runtime
+go run ./cmd/minidockd
+```
+
+In terminal two:
+
+```sh
+cd java-control-plane
+./mvnw spring-boot:run
+```
+
+Java serves its local API at `http://127.0.0.1:8080` by default. The Go socket
+defaults to `/tmp/minidock-runtime.sock` and has mode `0660`. Override it with
+`MINIDOCK_SOCKET` in both processes.
+
+## Commands
+
+`bin/minidock` provides a small CLI for the Java API:
+
+```sh
+bin/minidock build -t alpine-base alpine-minirootfs.tar.gz
+bin/minidock images
+bin/minidock run -m 256M -c 50 alpine-base /bin/sh -c 'echo hello'
+bin/minidock ps
+bin/minidock stop CONTAINER_ID
+```
+
+`build` stages an existing `.tar` or `.tar.gz` rootfs archive; it does not
+build a Dockerfile. `run` returns after Go confirms startup and reports the
+container ID and host PID. It currently runs detached and does not forward the
+caller's terminal input/output. Java exposes the same operations through
+`/api/v1/images` and `/api/v1/containers`.
+
+## Storage and host requirements
+
+Image archives and extracted containers default to
+`${user.home}/.local/share/minidock/{images,containers}`. Set
+`MINIDOCK_IMAGES_DIR` or `MINIDOCK_CONTAINERS_DIR` to change those paths. Java
+keeps lifecycle records in memory; they reset when Java restarts.
+
+The Go runtime requires Linux. Namespace creation and mounts depend on host
+kernel policy. CPU and memory limits require a writable delegated cgroups v2
+hierarchy; set `MINIDOCK_CGROUP_ROOT` to its MiniDock subdirectory. Container
+networking requires `iproute2`, `nsenter`, and permission to create bridge and
+veth devices. MiniDock configures the bridge and default route, while host
+forwarding/NAT for external network access must be configured separately.
+
+The Java-to-Go contract is protobuf gRPC over the local Unix socket. Go's
+`Start`, `Wait`, and `Stop` operations let Java acknowledge startup with a PID,
+wait for exit status, and stop the workload.
