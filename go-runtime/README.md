@@ -23,15 +23,24 @@ waited for before the socket server exits.
    Configure a delegated cgroups v2 subtree with `MINIDOCK_CGROUP_ROOT`.
 4. `network` creates `minidock0` at `10.0.0.1/24`, assigns a container IP,
    attaches a veth, and configures the container default route. This requires
-   `ip`, `nsenter`, and `CAP_NET_ADMIN`. Host forwarding and NAT are not
-   installed automatically.
+   `ip`, `nsenter`, `iptables`, `CAP_NET_ADMIN`, and permission to change IPv4
+   forwarding. It installs idempotent masquerade and forwarding rules, then
+   removes rules it owns and restores the prior forwarding setting on normal
+   daemon shutdown.
 5. The namespace child brings loopback up, bind-mounts rootfs, mounts `/proc`,
    calls `pivot_root`, detaches the old root, acknowledges setup, and execs the
    command. A failed `/proc` mount fails startup.
 
-The runtime does not extract images, persist state, or yet relay an attached
-caller terminal over the socket. Child stdio inherits the daemon's streams.
-Kernel capabilities and cgroup delegation must be provisioned by the host.
+For `attach` requests, the runtime creates a PTY, makes it the child's
+controlling terminal, and exposes a bidirectional gRPC stream for terminal
+input/output, window-size updates, and the final exit code. The CLI connects to
+that stream after receiving the start acknowledgement.
+
+The runtime does not extract images or persist state. Non-attached child stdio
+inherits the daemon's streams. Kernel capabilities and cgroup delegation must
+be provisioned by the host. Forwarding settings are restored on normal daemon
+shutdown; a forced shutdown can leave host firewall rules or forwarding
+enabled and should be followed by host-level cleanup.
 
 ## Packages and verification
 
