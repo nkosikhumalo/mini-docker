@@ -3,6 +3,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -108,6 +109,12 @@ func TestGoRuntimeEndToEnd(t *testing.T) {
 	if !strings.Contains(strings.Join(networkCommands.commands, "\n"), "ip route replace default via 10.0.0.1 dev eth0") {
 		t.Fatalf("network setup did not configure a default route: %v", networkCommands.commands)
 	}
+	if !strings.Contains(strings.Join(networkCommands.commands, "\n"), "iptables -t nat -A POSTROUTING -s 10.0.0.0/24 ! -o minidock0 -j MASQUERADE -m comment --comment minidock-managed") {
+		t.Fatalf("network setup did not configure masquerading: %v", networkCommands.commands)
+	}
+	if err := backend.Network.Close(); err != nil {
+		t.Fatalf("close network manager: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "system-test")); !os.IsNotExist(err) {
 		t.Fatalf("temporary cgroup was not cleaned up: %v", err)
 	}
@@ -144,8 +151,8 @@ func TestRuntimeSocketPermissions(t *testing.T) {
 func TestManagedStartWaitStopLifecycle(t *testing.T) {
 	server := grpc.NewServer()
 	workloadDone := make(chan struct{})
-	RegisterManagedRuntime(server, func(ctx context.Context, _ container.Config, started func(int)) error {
-		started(4242)
+	RegisterManagedRuntime(server, func(ctx context.Context, _ container.Config, started func(container.StartedProcess)) error {
+		started(container.StartedProcess{PID: 4242})
 		select {
 		case <-ctx.Done():
 			return nil
@@ -187,6 +194,91 @@ func TestManagedStartWaitStopLifecycle(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("wait did not finish after stop")
+	}
+}
+
+func TestAttachRelaysInputAndOutput(t *testing.T) {
+	server := grpc.NewServer()
+	RegisterManagedRuntime(server, func(ctx context.Context, _ container.Config, started func(container.StartedProcess)) error {
+		stdinReader, stdinWriter := io.Pipe()
+		stdoutReader, stdoutWriter := io.Pipe()
+		started(container.StartedProcess{PID: 5151, Stdin: stdinWriter, Stdout: stdoutReader})
+		finished := make(chan error, 1)
+		go func() {
+			_, err := io.Copy(stdoutWriter, stdinReader)
+			_ = stdoutWriter.Close()
+			_ = stdinReader.Close()
+			finished <- err
+		}()
+		select {
+		case err := <-finished:
+			return err
+		case <-ctx.Done():
+			_ = stdinReader.Close()
+			_ = stdoutWriter.Close()
+			return ctx.Err()
+		}
+	})
+	listener := bufconn.Listen(1 << 20)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = listener.Close(); server.Stop() })
+	conn, err := grpc.DialContext(context.Background(), "attach-test",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	client := NewRuntimeClient(conn)
+	request := &runtimev1.RunRequest{Id: "attach-test", Rootfs: "/tmp/minidock-test-root", Command: []string{"/bin/sh"}, Attach: true}
+	started, err := client.Start(context.Background(), request)
+	if err != nil || started.GetPid() != 5151 {
+		t.Fatalf("start returned %#v, %v", started, err)
+	}
+	stream, err := client.Attach(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SendMsg(&runtimev1.AttachInput{ContainerId: request.GetId()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SendMsg(&runtimev1.AttachInput{Stdin: []byte("interactive input\n")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SendMsg(&runtimev1.AttachInput{StdinEof: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.CloseSend(); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	gotExit := false
+	for {
+		message := new(runtimev1.AttachOutput)
+		err := stream.RecvMsg(message)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if message.GetExited() {
+			gotExit = true
+			if message.GetExitCode() != 0 {
+				t.Fatalf("attach exit code = %d", message.GetExitCode())
+			}
+			continue
+		}
+		output.Write(message.GetData())
+	}
+	if output.String() != "interactive input\n" {
+		t.Fatalf("attach output = %q", output.String())
+	}
+	if !gotExit {
+		t.Fatal("attach stream did not return an exit event")
+	}
+	if _, err := client.Wait(context.Background(), &runtimev1.WaitRequest{Id: request.GetId()}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -239,6 +331,9 @@ type fakeNetworkRunner struct {
 func (r *fakeNetworkRunner) Run(_ context.Context, name string, args ...string) error {
 	command := strings.Join(append([]string{name}, args...), " ")
 	r.commands = append(r.commands, command)
+	if name == "iptables" && len(args) > 2 && args[2] == "-C" {
+		return errors.New("rule does not exist")
+	}
 	if command == "ip link show dev minidock0" && !r.bridgeExists {
 		return errors.New("bridge does not exist")
 	}
