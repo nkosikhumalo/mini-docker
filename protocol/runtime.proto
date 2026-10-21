@@ -12,6 +12,7 @@ service RuntimeService {
   rpc Start(RunRequest) returns (StartResponse);
   rpc Wait(WaitRequest) returns (RunResponse);
   rpc Stop(StopRequest) returns (StopResponse);
+  rpc Attach(stream AttachInput) returns (stream AttachOutput);
 }
 
 message RunRequest {
@@ -25,6 +26,8 @@ message RunRequest {
   uint64 cpu_period = 8;
   bool network = 9;
   string network_ip = 10;
+  bool attach = 11;
+  bool tty = 12;
 }
 
 message RunResponse {
@@ -46,4 +49,21 @@ message StopRequest {
 
 message StopResponse {
   bool stopped = 1;
+}
+
+message AttachInput {
+  // The first message identifies the session; later messages carry stdin.
+  string container_id = 1;
+  bytes stdin = 2;
+  bool stdin_eof = 3;
+  uint32 rows = 4;
+  uint32 columns = 5;
+}
+
+message AttachOutput {
+  // stream is 1 for stdout and 2 for stderr.
+  int32 stream = 1;
+  bytes data = 2;
+  bool exited = 3;
+  int32 exit_code = 4;
 }
