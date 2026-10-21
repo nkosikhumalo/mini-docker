@@ -5,6 +5,7 @@ package network
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -18,6 +19,15 @@ type recordingRunner struct {
 func (r *recordingRunner) Run(_ context.Context, name string, args ...string) error {
 	command := strings.Join(append([]string{name}, args...), " ")
 	r.commands = append(r.commands, command)
+	if name == "iptables" && len(args) > 2 && args[2] == "-C" {
+		addCommand := strings.Replace(command, " -C ", " -A ", 1)
+		for _, existing := range r.commands {
+			if existing == addCommand {
+				return nil
+			}
+		}
+		return errors.New("rule does not exist")
+	}
 	if command == "ip link show dev minidock0" && !r.bridgeExists {
 		return errors.New("bridge does not exist")
 	}
@@ -60,6 +70,13 @@ func TestBridgeManagerConfigureAndCleanup(t *testing.T) {
 	if _, exists := manager.leases["container-one"]; exists {
 		t.Fatal("cleanup retained the container IP lease")
 	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	joined = strings.Join(runner.commands, "\n")
+	if !strings.Contains(joined, "iptables -t nat -A POSTROUTING") || !strings.Contains(joined, "iptables -t nat -D POSTROUTING") {
+		t.Fatalf("manager did not install and remove its NAT rule:\n%s", joined)
+	}
 }
 
 func TestBridgeManagerUsesDistinctAddresses(t *testing.T) {
@@ -94,5 +111,26 @@ func TestBridgeManagerRollsBackCreatedVeth(t *testing.T) {
 	}
 	if _, exists := manager.leases["rollback"]; exists {
 		t.Fatal("failed setup retained its IP lease after successful rollback")
+	}
+	_ = manager.Close()
+}
+
+func TestForwarderRestoresPriorSetting(t *testing.T) {
+	path := t.TempDir() + "/ip_forward"
+	if err := os.WriteFile(path, []byte("0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cleanup, err := (procForwarder{path: path}).Enable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, _ := os.ReadFile(path); strings.TrimSpace(string(value)) != "1" {
+		t.Fatalf("forwarding = %q", value)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if value, _ := os.ReadFile(path); strings.TrimSpace(string(value)) != "0" {
+		t.Fatalf("forwarding restore = %q", value)
 	}
 }
