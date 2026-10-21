@@ -59,7 +59,12 @@ func main() {
 
 	server := grpc.NewServer()
 	networkManager := network.NewBridgeManager()
-	shutdownRuntime := transport.RegisterManagedRuntime(server, func(ctx context.Context, cfg container.Config, started func(int)) error {
+	defer func() {
+		if err := networkManager.Close(); err != nil {
+			log.Printf("network cleanup: %v", err)
+		}
+	}()
+	shutdownRuntime := transport.RegisterManagedRuntime(server, func(ctx context.Context, cfg container.Config, started func(container.StartedProcess)) error {
 		return container.RunStarted(ctx, cfg, isolation.ChildStarter{Network: networkManager}, started)
 	})
 	stopped := make(chan os.Signal, 1)
@@ -68,6 +73,9 @@ func main() {
 	go func() {
 		<-stopped
 		shutdownRuntime()
+		if err := networkManager.Close(); err != nil {
+			log.Printf("network cleanup: %v", err)
+		}
 		server.Stop()
 		close(shutdownDone)
 	}()
