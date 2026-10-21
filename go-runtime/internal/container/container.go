@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 )
 
@@ -21,6 +22,7 @@ type Config struct {
 	CPUQuota  uint64   `json:"cpu_quota,omitempty"`
 	CPUPeriod uint64   `json:"cpu_period,omitempty"`
 	Network   bool     `json:"network,omitempty"`
+	NetworkIP string   `json:"network_ip,omitempty"`
 }
 
 // Validate rejects incomplete or unsafe-to-interpret launch descriptions.
@@ -62,6 +64,15 @@ func (c Config) Validate() error {
 	if (c.CPUQuota == 0) != (c.CPUPeriod == 0) {
 		return errors.New("cpu quota and period must be specified together")
 	}
+	if c.NetworkIP != "" {
+		if !c.Network {
+			return errors.New("network_ip requires networking to be enabled")
+		}
+		ip := net.ParseIP(c.NetworkIP).To4()
+		if ip == nil || ip[0] != 10 || ip[1] != 0 || ip[2] != 0 || ip[3] < 2 || ip[3] > 254 {
+			return errors.New("network_ip must be an available address in 10.0.0.2/24 through 10.0.0.254/24")
+		}
+	}
 	return nil
 }
 
@@ -85,6 +96,13 @@ type Backend interface {
 // Run prepares and executes a container, cleaning up acquired host resources
 // in reverse order on setup failure and after the workload exits.
 func Run(ctx context.Context, cfg Config, backend Backend) (runErr error) {
+	return RunStarted(ctx, cfg, backend, nil)
+}
+
+// RunStarted runs a container and calls started after kernel setup has
+// completed and the workload has been released. This lets the daemon return
+// the host PID before waiting for the container's eventual exit.
+func RunStarted(ctx context.Context, cfg Config, backend Backend, started func(int)) (runErr error) {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -117,6 +135,9 @@ func Run(ctx context.Context, cfg Config, backend Backend) (runErr error) {
 	}
 	if err := child.Exec(ctx, cfg); err != nil {
 		return fmt.Errorf("execute container workload: %w", err)
+	}
+	if started != nil {
+		started(child.PID())
 	}
 	if err := child.Wait(); err != nil {
 		return fmt.Errorf("wait for container workload: %w", err)
