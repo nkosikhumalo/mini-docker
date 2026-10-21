@@ -1,9 +1,8 @@
 # Runtime protocol
 
-The Go jailer exposes gRPC over a Unix domain socket with gRPC's JSON content
-subtype. `minidock.runtime.v1.RuntimeService/Run` accepts a prepared rootfs
-path, command, environment, hostname, and optional CPU and memory limits. The
-call blocks until the workload exits; canceling the RPC stops it. The request
-and response types are in `go-runtime/internal/transport/runtime_linux.go`.
-`runtime.proto` is reserved for a future protobuf wire contract and is not used
-by the current JSON transport. The Java gRPC client remains to be connected.
+`runtime.proto` is the shared protobuf contract for Java and Go. `Start`
+accepts container configuration and returns the host PID and selected IP after
+the runtime has completed setup. `Wait` returns the workload exit code, and
+`Stop` cancels the running process. The Go messages are generated into
+`go-runtime/gen/runtime/v1`; Maven generates Java messages and gRPC stubs from
+this file.
