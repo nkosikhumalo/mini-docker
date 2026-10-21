@@ -34,7 +34,7 @@ type ChildStarter struct {
 // StartPaused creates the child in fresh PID, mount, network, UTS, and IPC
 // namespaces. It does not require a privileged command; Linux permissions
 // determine whether the kernel permits these namespaces for this caller.
-func (ChildStarter) StartPaused(ctx context.Context, _ container.Config) (container.Child, error) {
+func (ChildStarter) StartPaused(ctx context.Context, config container.Config) (container.Child, error) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("create child release pipe: %w", err)
@@ -46,27 +46,123 @@ func (ChildStarter) StartPaused(ctx context.Context, _ container.Config) (contai
 		return nil, fmt.Errorf("create child setup acknowledgement pipe: %w", err)
 	}
 	cmd := exec.CommandContext(ctx, os.Args[0])
+	child := &Child{cmd: cmd}
+	var inherited []*os.File
+	if config.TTY {
+		child.pty, err = openPTY()
+		if err != nil {
+			_ = r.Close()
+			_ = w.Close()
+			_ = readyR.Close()
+			_ = readyW.Close()
+			return nil, fmt.Errorf("create container pty: %w", err)
+		}
+		child.stdin, child.stdout = child.pty.input, child.pty.output
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = child.pty.slave, child.pty.slave, child.pty.slave
+	} else if config.Attach {
+		stdinRead, stdinWrite, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			err = pipeErr
+		}
+		if err == nil {
+			child.stdin, cmd.Stdin = stdinWrite, stdinRead
+			inherited = append(inherited, stdinRead)
+		}
+		if err != nil {
+			_ = r.Close()
+			_ = w.Close()
+			_ = readyR.Close()
+			_ = readyW.Close()
+			return nil, fmt.Errorf("create container stdin pipe: %w", err)
+		}
+		stdoutRead, stdoutWrite, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			err = pipeErr
+		}
+		if err == nil {
+			child.stdout, cmd.Stdout = stdoutRead, stdoutWrite
+			inherited = append(inherited, stdoutWrite)
+		}
+		if err != nil {
+			_ = r.Close()
+			_ = w.Close()
+			_ = readyR.Close()
+			_ = readyW.Close()
+			_ = child.stdin.Close()
+			for _, file := range inherited {
+				_ = file.Close()
+			}
+			return nil, fmt.Errorf("create container stdout pipe: %w", err)
+		}
+		stderrRead, stderrWrite, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			err = pipeErr
+		}
+		if err == nil {
+			child.stderr, cmd.Stderr = stderrRead, stderrWrite
+			inherited = append(inherited, stderrWrite)
+		}
+		if err != nil {
+			_ = child.stdin.Close()
+			_ = child.stdout.Close()
+			for _, file := range inherited {
+				_ = file.Close()
+			}
+			_ = r.Close()
+			_ = w.Close()
+			_ = readyR.Close()
+			_ = readyW.Close()
+			return nil, fmt.Errorf("create container stderr pipe: %w", err)
+		}
+	} else {
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 	cmd.Env = append(os.Environ(), childEnv+"=1")
 	cmd.ExtraFiles = []*os.File{r, readyW}
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET | syscall.CLONE_NEWUTS | syscall.CLONE_NEWIPC,
 		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
 		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
 		GidMappingsEnableSetgroups: false,
 	}
+	if config.TTY {
+		cmd.SysProcAttr.Setsid, cmd.SysProcAttr.Setctty, cmd.SysProcAttr.Ctty = true, true, 0
+	}
 	if err := cmd.Start(); err != nil {
+		for _, file := range inherited {
+			_ = file.Close()
+		}
+		if child.stdin != nil {
+			_ = child.stdin.Close()
+		}
+		if child.stdout != nil {
+			_ = child.stdout.Close()
+		}
+		if child.stderr != nil {
+			_ = child.stderr.Close()
+		}
+		if child.pty != nil {
+			_ = child.pty.Close()
+		}
 		_ = r.Close()
 		_ = w.Close()
 		_ = readyR.Close()
 		_ = readyW.Close()
 		return nil, fmt.Errorf("start namespaced child: %w", err)
 	}
+	for _, file := range inherited {
+		_ = file.Close()
+	}
+	if child.pty != nil && child.pty.slave != nil {
+		_ = child.pty.slave.Close()
+		child.pty.slave = nil
+	}
 	_ = r.Close()
 	_ = readyW.Close()
-	child := &Child{cmd: cmd, release: w, ready: readyR}
+	child.release = w
+	child.ready = readyR
 	if err := child.verifyNamespaces(); err != nil {
 		_ = child.Close()
 		_ = cmd.Wait()
@@ -107,13 +203,21 @@ func (starter ChildStarter) ConfigureNetwork(ctx context.Context, cfg container.
 // entry point.
 type Child struct {
 	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	stderr   io.ReadCloser
+	pty      *PseudoTerminal
 	release  *os.File
 	ready    *os.File
 	released bool
 	waited   bool
 }
 
-func (c *Child) PID() int { return c.cmd.Process.Pid }
+func (c *Child) PID() int                          { return c.cmd.Process.Pid }
+func (c *Child) Stdin() io.WriteCloser             { return c.stdin }
+func (c *Child) Stdout() io.ReadCloser             { return c.stdout }
+func (c *Child) Stderr() io.ReadCloser             { return c.stderr }
+func (c *Child) Resize(columns, rows uint16) error { return c.pty.Resize(columns, rows) }
 
 // Exec sends the workload configuration and releases the child. In the child
 // process this method name corresponds to entering the workload via execve.
@@ -155,6 +259,10 @@ func (c *Child) Close() error {
 	if c.ready != nil {
 		_ = c.ready.Close()
 		c.ready = nil
+	}
+	if c.pty != nil {
+		_ = c.pty.Close()
+		c.pty = nil
 	}
 	if c.cmd.ProcessState != nil || c.cmd.Process == nil {
 		return nil
