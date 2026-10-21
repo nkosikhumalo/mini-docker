@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -35,20 +37,66 @@ func (commandRunner) Run(ctx context.Context, name string, args ...string) error
 	return nil
 }
 
+type Forwarder interface{ Enable() (func() error, error) }
+
+type procForwarder struct{ path string }
+
+func (p procForwarder) Enable() (func() error, error) {
+	value, err := os.ReadFile(p.path)
+	if err != nil {
+		return nil, fmt.Errorf("read IPv4 forwarding setting: %w", err)
+	}
+	previous := strings.TrimSpace(string(value))
+	if previous == "1" {
+		return func() error { return nil }, nil
+	}
+	if previous != "0" {
+		return nil, fmt.Errorf("unexpected IPv4 forwarding value %q", previous)
+	}
+	if err := os.WriteFile(p.path, []byte("1"), 0644); err != nil {
+		return nil, fmt.Errorf("enable IPv4 forwarding: %w", err)
+	}
+	return func() error {
+		current, err := os.ReadFile(p.path)
+		if err != nil {
+			return fmt.Errorf("read IPv4 forwarding setting during restore: %w", err)
+		}
+		if strings.TrimSpace(string(current)) != "1" {
+			return nil
+		}
+		if err := os.WriteFile(p.path, []byte(previous), 0644); err != nil {
+			return fmt.Errorf("restore IPv4 forwarding setting: %w", err)
+		}
+		return nil
+	}, nil
+}
+
+type firewallRule struct {
+	table, chain string
+	args         []string
+}
+
 // BridgeManager creates a host bridge and veth pair for each opted-in
 // container. It requires iproute2, util-linux nsenter, and host CAP_NET_ADMIN.
 type BridgeManager struct {
-	mu       sync.Mutex
-	runner   CommandRunner
-	bridge   string
-	gateway  net.IP
-	leases   map[string]string // container ID -> IPv4 address
-	usedIPv4 map[string]bool
-	nextHost int
+	mu                sync.Mutex
+	runner            CommandRunner
+	bridge            string
+	gateway           net.IP
+	leases            map[string]string // container ID -> IPv4 address
+	usedIPv4          map[string]bool
+	nextHost          int
+	forwarder         Forwarder
+	forwardingCleanup func() error
+	natRules          []firewallRule
+	natReady          bool
+	ownedBridge       bool
 }
 
 func NewBridgeManager() *BridgeManager {
-	return NewBridgeManagerWithRunner(commandRunner{})
+	manager := NewBridgeManagerWithRunner(commandRunner{})
+	manager.forwarder = procForwarder{path: "/proc/sys/net/ipv4/ip_forward"}
+	return manager
 }
 
 func NewBridgeManagerWithRunner(runner CommandRunner) *BridgeManager {
@@ -56,14 +104,19 @@ func NewBridgeManagerWithRunner(runner CommandRunner) *BridgeManager {
 		runner = commandRunner{}
 	}
 	return &BridgeManager{
-		runner:   runner,
-		bridge:   defaultBridge,
-		gateway:  net.ParseIP(defaultGateway).To4(),
-		leases:   make(map[string]string),
-		usedIPv4: map[string]bool{defaultGateway: true},
-		nextHost: 2,
+		runner:    runner,
+		bridge:    defaultBridge,
+		gateway:   net.ParseIP(defaultGateway).To4(),
+		leases:    make(map[string]string),
+		usedIPv4:  map[string]bool{defaultGateway: true},
+		nextHost:  2,
+		forwarder: ForwarderFunc(func() (func() error, error) { return func() error { return nil }, nil }),
 	}
 }
+
+type ForwarderFunc func() (func() error, error)
+
+func (f ForwarderFunc) Enable() (func() error, error) { return f() }
 
 // Configure ensures the bridge exists, attaches a veth to the isolated
 // network namespace identified by pid, and returns cleanup for the veth/IP lease.
@@ -166,6 +219,7 @@ func (m *BridgeManager) ensureBridge(ctx context.Context) error {
 		if err := m.runner.Run(ctx, "ip", "link", "add", "name", m.bridge, "type", "bridge"); err != nil {
 			return fmt.Errorf("create bridge %s: %w", m.bridge, err)
 		}
+		m.ownedBridge = true
 	}
 	address := fmt.Sprintf("%s/%d", m.gateway.String(), defaultPrefix)
 	if err := m.runner.Run(ctx, "ip", "address", "replace", address, "dev", m.bridge); err != nil {
@@ -174,7 +228,90 @@ func (m *BridgeManager) ensureBridge(ctx context.Context) error {
 	if err := m.runner.Run(ctx, "ip", "link", "set", "dev", m.bridge, "up"); err != nil {
 		return fmt.Errorf("bring bridge up: %w", err)
 	}
+	if !m.natReady {
+		if err := m.enableNAT(ctx); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (m *BridgeManager) enableNAT(ctx context.Context) error {
+	cleanupForwarding, err := m.forwarder.Enable()
+	if err != nil {
+		return err
+	}
+	if cleanupForwarding == nil {
+		cleanupForwarding = func() error { return nil }
+	}
+	rules := []firewallRule{
+		{table: "nat", chain: "POSTROUTING", args: []string{"-s", "10.0.0.0/24", "!", "-o", m.bridge, "-j", "MASQUERADE", "-m", "comment", "--comment", "minidock-managed"}},
+		{chain: "FORWARD", args: []string{"-i", m.bridge, "-j", "ACCEPT", "-m", "comment", "--comment", "minidock-managed"}},
+		{chain: "FORWARD", args: []string{"-o", m.bridge, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT", "-m", "comment", "--comment", "minidock-managed"}},
+	}
+	added := make([]firewallRule, 0, len(rules))
+	for _, rule := range rules {
+		check := append([]string{}, rule.args...)
+		check = append([]string{"-t", tableName(rule.table), "-C", rule.chain}, check...)
+		if m.runner.Run(ctx, "iptables", check...) == nil {
+			added = append(added, rule)
+			continue
+		}
+		add := append([]string{}, rule.args...)
+		add = append([]string{"-t", tableName(rule.table), "-A", rule.chain}, add...)
+		if err := m.runner.Run(ctx, "iptables", add...); err != nil {
+			for i := len(added) - 1; i >= 0; i-- {
+				_ = m.deleteRule(context.Background(), added[i])
+			}
+			_ = cleanupForwarding()
+			return fmt.Errorf("install outbound NAT/forwarding rule: %w", err)
+		}
+		added = append(added, rule)
+	}
+	m.natRules = append(m.natRules, added...)
+	m.forwardingCleanup = cleanupForwarding
+	m.natReady = true
+	return nil
+}
+
+func tableName(table string) string {
+	if table == "" {
+		return "filter"
+	}
+	return table
+}
+
+func (m *BridgeManager) deleteRule(ctx context.Context, rule firewallRule) error {
+	args := append([]string{}, rule.args...)
+	args = append([]string{"-t", tableName(rule.table), "-D", rule.chain}, args...)
+	if err := m.runner.Run(ctx, "iptables", args...); err != nil && !strings.Contains(err.Error(), "Bad rule") && !strings.Contains(err.Error(), "No chain/target/match") {
+		return fmt.Errorf("remove iptables rule: %w", err)
+	}
+	return nil
+}
+
+// Close removes the firewall rules created by this manager and restores the
+// prior forwarding setting. It should run after all container veths are gone.
+func (m *BridgeManager) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var result error
+	for i := len(m.natRules) - 1; i >= 0; i-- {
+		result = errors.Join(result, m.deleteRule(context.Background(), m.natRules[i]))
+	}
+	m.natRules = nil
+	if m.forwardingCleanup != nil {
+		result = errors.Join(result, m.forwardingCleanup())
+		m.forwardingCleanup = nil
+	}
+	if m.ownedBridge {
+		if err := m.runner.Run(context.Background(), "ip", "link", "del", "dev", m.bridge); err != nil && !strings.Contains(err.Error(), "Cannot find device") {
+			result = errors.Join(result, fmt.Errorf("remove bridge: %w", err))
+		}
+		m.ownedBridge = false
+	}
+	m.natReady = false
+	return result
 }
 
 func (m *BridgeManager) allocateIP() (string, error) {
