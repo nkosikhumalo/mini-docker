@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,9 +39,15 @@ func (ChildStarter) StartPaused(ctx context.Context, _ container.Config) (contai
 	if err != nil {
 		return nil, fmt.Errorf("create child release pipe: %w", err)
 	}
+	readyR, readyW, err := os.Pipe()
+	if err != nil {
+		_ = r.Close()
+		_ = w.Close()
+		return nil, fmt.Errorf("create child setup acknowledgement pipe: %w", err)
+	}
 	cmd := exec.CommandContext(ctx, os.Args[0])
 	cmd.Env = append(os.Environ(), childEnv+"=1")
-	cmd.ExtraFiles = []*os.File{r}
+	cmd.ExtraFiles = []*os.File{r, readyW}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -53,10 +60,13 @@ func (ChildStarter) StartPaused(ctx context.Context, _ container.Config) (contai
 	if err := cmd.Start(); err != nil {
 		_ = r.Close()
 		_ = w.Close()
+		_ = readyR.Close()
+		_ = readyW.Close()
 		return nil, fmt.Errorf("start namespaced child: %w", err)
 	}
 	_ = r.Close()
-	child := &Child{cmd: cmd, release: w}
+	_ = readyW.Close()
+	child := &Child{cmd: cmd, release: w, ready: readyR}
 	if err := child.verifyNamespaces(); err != nil {
 		_ = child.Close()
 		_ = cmd.Wait()
@@ -90,7 +100,7 @@ func (starter ChildStarter) ConfigureNetwork(ctx context.Context, cfg container.
 	if starter.Network == nil {
 		return nil, errors.New("container networking was requested but no bridge manager is configured")
 	}
-	return starter.Network.Configure(ctx, cfg.ID, pid)
+	return starter.Network.ConfigureWithIP(ctx, cfg.ID, pid, cfg.NetworkIP)
 }
 
 // Child is the host-side handle for a process blocked in the namespace child
@@ -98,6 +108,7 @@ func (starter ChildStarter) ConfigureNetwork(ctx context.Context, cfg container.
 type Child struct {
 	cmd      *exec.Cmd
 	release  *os.File
+	ready    *os.File
 	released bool
 	waited   bool
 }
@@ -119,6 +130,12 @@ func (c *Child) Exec(_ context.Context, config container.Config) error {
 	if closeErr != nil {
 		return fmt.Errorf("release child: %w", closeErr)
 	}
+	var acknowledgment [1]byte
+	if _, err := io.ReadFull(c.ready, acknowledgment[:]); err != nil {
+		return fmt.Errorf("container setup failed before workload exec: %w", err)
+	}
+	_ = c.ready.Close()
+	c.ready = nil
 	return nil
 }
 
@@ -134,6 +151,10 @@ func (c *Child) Close() error {
 	if c.release != nil {
 		_ = c.release.Close()
 		c.release = nil
+	}
+	if c.ready != nil {
+		_ = c.ready.Close()
+		c.ready = nil
 	}
 	if c.cmd.ProcessState != nil || c.cmd.Process == nil {
 		return nil
@@ -174,6 +195,11 @@ func RunChild() (int, error) {
 		return 0, errors.New("missing child configuration pipe")
 	}
 	defer fd.Close()
+	ready := os.NewFile(4, "minidock-child-ready")
+	if ready == nil {
+		return 1, errors.New("missing child setup acknowledgement pipe")
+	}
+	defer ready.Close()
 	var config container.Config
 	if err := json.NewDecoder(fd).Decode(&config); err != nil {
 		return 0, fmt.Errorf("read child configuration: %w", err)
@@ -210,6 +236,10 @@ func RunChild() (int, error) {
 				env = append(env, item)
 			}
 		}
+	}
+	syscall.CloseOnExec(int(ready.Fd()))
+	if _, err := ready.Write([]byte{1}); err != nil {
+		return 1, fmt.Errorf("acknowledge container setup: %w", err)
 	}
 	if err := syscall.Exec(path, config.Command, env); err != nil {
 		if errors.Is(err, syscall.ENOENT) {
