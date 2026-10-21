@@ -1,2 +1,49 @@
-// Reserved for a future shared protobuf contract. The current runtime uses
-// JSON gRPC messages documented in protocol/README.md.
+syntax = "proto3";
+
+package minidock.runtime.v1;
+
+option go_package = "mini-docker/go-runtime/gen/runtime/v1;runtimev1";
+option java_multiple_files = true;
+option java_package = "dev.minidocker.runtime.v1";
+option java_outer_classname = "RuntimeProtocol";
+
+// RuntimeService is the local Java-to-Go kernel execution boundary.
+service RuntimeService {
+  rpc Start(RunRequest) returns (StartResponse);
+  rpc Wait(WaitRequest) returns (RunResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+}
+
+message RunRequest {
+  string id = 1;
+  string rootfs = 2;
+  repeated string command = 3;
+  repeated string env = 4;
+  string hostname = 5;
+  uint64 memory_max = 6;
+  uint64 cpu_quota = 7;
+  uint64 cpu_period = 8;
+  bool network = 9;
+  string network_ip = 10;
+}
+
+message RunResponse {
+  int32 exit_code = 1;
+}
+
+message StartResponse {
+  int32 pid = 1;
+  string network_ip = 2;
+}
+
+message WaitRequest {
+  string id = 1;
+}
+
+message StopRequest {
+  string id = 1;
+}
+
+message StopResponse {
+  bool stopped = 1;
+}
