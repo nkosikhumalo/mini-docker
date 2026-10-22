@@ -8,6 +8,7 @@ import dev.minidocker.runtime.RuntimeGateway;
 import dev.minidocker.state.ContainerRecord;
 import dev.minidocker.state.ContainerIpAllocator;
 import dev.minidocker.state.ContainerRegistry;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -20,6 +21,8 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -62,7 +65,7 @@ public class ContainerService {
         }
         ContainerRecord record;
         try {
-            record = registry.create(id, validated.image(), networkIp);
+            record = registry.create(id, validated.image(), validated.command(), networkIp);
         } catch (RuntimeException failure) {
             ipAllocator.release(id);
             throw failure;
@@ -87,14 +90,15 @@ public class ContainerService {
                     validated.network(),
                     networkIp,
                     validated.attach(),
-                    validated.tty());
+                    validated.tty(),
+                    containerDirectory.resolve("container.log").toString());
             RuntimeGateway.Execution execution = runtime.run(config);
             if (record.start(execution)) {
                 execution.completion().whenComplete((result, failure) -> {
                     record.completed(result == null ? null : result.exitCode(), unwrap(failure));
                     ipAllocator.release(id);
                     try {
-                        RootfsExtractor.deleteTree(containerDirectory);
+                        RootfsExtractor.deleteTree(rootfs);
                     } catch (IOException cleanupError) {
                         // Runtime state is already final; cleanup failures are visible in server logs.
                         System.err.println("minidock: failed to clean rootfs for " + id + ": " + cleanupError);
@@ -137,6 +141,62 @@ public class ContainerService {
         ContainerRecord record = registry.require(id);
         record.requestStop();
         return record.view();
+    }
+
+    public RuntimeGateway.LogChunk logs(String id, long offset, long limit) {
+        if (offset < 0 || limit < 0 || limit > 1024L * 1024) {
+            throw new IllegalArgumentException("log offset must be nonnegative and limit must not exceed 1 MiB");
+        }
+        return runtime.logs(id, offset, limit);
+    }
+
+    @PostConstruct
+    public void reconcileAfterRestart() {
+        List<RuntimeGateway.ActiveContainer> active = runtime.listActive();
+        Map<String, RuntimeGateway.ActiveContainer> byId = new HashMap<>();
+        Map<String, String> leases = new HashMap<>();
+        for (RuntimeGateway.ActiveContainer container : active) {
+            byId.put(container.id(), container);
+            leases.put(container.id(), container.networkIp());
+        }
+        ipAllocator.restoreActiveLeases(leases);
+
+        Set<String> reconciledIds = new HashSet<>();
+        for (ContainerRecord record : registry.records()) {
+            RuntimeGateway.ActiveContainer running = byId.get(record.id());
+            if (running == null) {
+                record.recoveredExit();
+                ipAllocator.release(record.id());
+                cleanupRootfs(record.id());
+                continue;
+            }
+            reconciledIds.add(record.id());
+            RuntimeGateway.Execution execution = runtime.recover(running.id(), running.pid());
+            record.recoverActive(running.pid(), running.networkIp(), execution);
+            monitorRecovered(record, execution);
+        }
+        for (RuntimeGateway.ActiveContainer orphan : active) {
+            if (reconciledIds.contains(orphan.id())) continue;
+            RuntimeGateway.Execution execution = runtime.recover(orphan.id(), orphan.pid());
+            ContainerRecord recovered = registry.recoverUnknown(orphan, execution);
+            monitorRecovered(recovered, execution);
+        }
+    }
+
+    private void monitorRecovered(ContainerRecord record, RuntimeGateway.Execution execution) {
+        execution.completion().whenComplete((result, failure) -> {
+            record.completed(result == null ? null : result.exitCode(), unwrap(failure));
+            ipAllocator.release(record.id());
+            cleanupRootfs(record.id());
+        });
+    }
+
+    private void cleanupRootfs(String id) {
+        try {
+            RootfsExtractor.deleteTree(containersDirectory.resolve(id).resolve("rootfs"));
+        } catch (IOException cleanupError) {
+            System.err.println("minidock: failed to clean rootfs for " + id + ": " + cleanupError);
+        }
     }
 
     private static ValidatedRequest validate(CreateContainerRequest request) {
