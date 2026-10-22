@@ -39,6 +39,7 @@ bin/minidock run -it -m 256M -c 50 alpine-base /bin/sh
 bin/minidock run -d --no-network alpine-base /bin/sh -c 'echo hello'
 bin/minidock ps
 bin/minidock stop CONTAINER_ID
+bin/minidock logs CONTAINER_ID
 ```
 
 `build` stages an existing `.tar` or `.tar.gz` rootfs archive; it does not
@@ -52,7 +53,13 @@ container PTY, including terminal resize and exit-code forwarding. Java exposes 
 Image archives and extracted containers default to
 `${user.home}/.local/share/minidock/{images,containers}`. Set
 `MINIDOCK_IMAGES_DIR` or `MINIDOCK_CONTAINERS_DIR` to change those paths. Java
-keeps lifecycle records in memory; they reset when Java restarts.
+persists lifecycle snapshots atomically to `state.json`; override that path
+with `MINIDOCK_STATE_FILE`. A sibling lock file prevents a second Java control
+plane from writing the same state file. At startup Java reconciles saved records and IP
+leases with the Go daemon's active-session list. Detached stdout/stderr is kept
+in each container directory as `container.log`; logs remain after the rootfs
+is removed. Set `MINIDOCK_CONTAINERS_DIR` for both Java and Go if they run with
+different home directories.
 
 The Go runtime requires Linux. Namespace creation and mounts depend on host
 kernel policy. CPU and memory limits require a writable delegated cgroups v2
@@ -63,5 +70,8 @@ forwarding rules for `10.0.0.0/24`, then removes its rules and restores the
 previous forwarding setting on normal daemon shutdown.
 
 The Java-to-Go contract is protobuf gRPC over the local Unix socket. Go's
-`Start`, `Wait`, and `Stop` operations let Java acknowledge startup with a PID,
-wait for exit status, and stop the workload.
+`Start`, `Wait`, `Stop`, `ListActiveContainers`, and `GetContainerLogs`
+operations let Java acknowledge startup with a PID, wait for exit status,
+stop workloads, reconcile state, and retrieve bounded log ranges. Run
+`make test-integration` on a Linux host with the required privileges after
+`make test` passes.
