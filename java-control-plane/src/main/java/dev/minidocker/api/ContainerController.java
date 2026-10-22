@@ -4,6 +4,7 @@ import dev.minidocker.service.ContainerNotFoundException;
 import dev.minidocker.service.ContainerService;
 import dev.minidocker.image.ImageNotFoundException;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -41,6 +42,18 @@ public class ContainerController {
     @GetMapping("/{id}")
     public ContainerView get(@PathVariable String id) {
         return containers.get(id);
+    }
+
+    @GetMapping(value = "/{id}/logs", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    public ResponseEntity<byte[]> logs(@PathVariable String id,
+                                       @RequestParam(defaultValue = "0") long offset,
+                                       @RequestParam(defaultValue = "1048576") long limit) {
+        var chunk = containers.logs(id, offset, limit);
+        return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .header("X-MiniDock-Log-Size", Long.toString(chunk.totalSize()))
+                .header("X-MiniDock-Log-Offset", Long.toString(offset))
+                .body(chunk.data());
     }
 
     @DeleteMapping("/{id}")
