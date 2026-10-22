@@ -8,10 +8,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -26,13 +30,13 @@ type ManagedRunner func(context.Context, container.Config, func(container.Starte
 
 // RegisterRuntime exposes the compatibility Run method used by focused tests.
 func RegisterRuntime(server *grpc.Server, runner Runner) {
-	register(server, &runtimeServer{runner: runner})
+	register(server, &runtimeServer{runner: runner, logRoot: containerRoot()})
 }
 
 // RegisterManagedRuntime exposes Start/Wait/Stop. Start returns after the
 // child acknowledges namespace, limits, network, and rootfs setup.
 func RegisterManagedRuntime(server *grpc.Server, runner ManagedRunner) func() {
-	implementation := &runtimeServer{managed: runner, sessions: make(map[string]*session)}
+	implementation := &runtimeServer{managed: runner, sessions: make(map[string]*session), logRoot: containerRoot()}
 	register(server, implementation)
 	return implementation.shutdown
 }
@@ -46,6 +50,8 @@ func register(server *grpc.Server, implementation *runtimeServer) {
 			{MethodName: "Start", Handler: startHandler},
 			{MethodName: "Wait", Handler: waitHandler},
 			{MethodName: "Stop", Handler: stopHandler},
+			{MethodName: "ListActiveContainers", Handler: listActiveHandler},
+			{MethodName: "GetContainerLogs", Handler: getContainerLogsHandler},
 		},
 		Streams: []grpc.StreamDesc{{StreamName: "Attach", Handler: attachHandler, ServerStreams: true, ClientStreams: true}},
 	}, implementation)
@@ -56,6 +62,8 @@ type runtimeService interface {
 	Start(context.Context, *runtimev1.RunRequest) (*runtimev1.StartResponse, error)
 	Wait(context.Context, *runtimev1.WaitRequest) (*runtimev1.RunResponse, error)
 	Stop(context.Context, *runtimev1.StopRequest) (*runtimev1.StopResponse, error)
+	ListActiveContainers(context.Context, *runtimev1.ListActiveContainersRequest) (*runtimev1.ListActiveContainersResponse, error)
+	GetContainerLogs(context.Context, *runtimev1.GetContainerLogsRequest) (*runtimev1.GetContainerLogsResponse, error)
 	Attach(grpc.ServerStream) error
 }
 
@@ -68,8 +76,11 @@ type session struct {
 	err            error
 	stdin          io.WriteCloser
 	resize         func(uint16, uint16) error
+	networkIP      string
 	tty            bool
 	output         chan *runtimev1.AttachOutput
+	outputStop     chan struct{}
+	outputStopOnce sync.Once
 	attach         bool
 	attachFinished bool
 	waited         bool
@@ -79,10 +90,13 @@ type session struct {
 }
 
 type runtimeServer struct {
-	runner   Runner
-	managed  ManagedRunner
-	mu       sync.Mutex
+	runner  Runner
+	managed ManagedRunner
+	mu      sync.Mutex
+	// This is the daemon's live process/session index. Entries retain the
+	// cancellation handle, PID, and attached streams needed for Stop and Wait.
 	sessions map[string]*session
+	logRoot  string
 }
 
 func (s *runtimeServer) Run(ctx context.Context, request *runtimev1.RunRequest) (*runtimev1.RunResponse, error) {
@@ -111,7 +125,7 @@ func (s *runtimeServer) Start(_ context.Context, request *runtimev1.RunRequest) 
 		return nil, status.Error(codes.AlreadyExists, "container id is already active")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	item := &session{id: config.ID, cancel: cancel, started: make(chan struct{}), done: make(chan struct{}), attachEnabled: config.Attach}
+	item := &session{id: config.ID, cancel: cancel, started: make(chan struct{}), done: make(chan struct{}), outputStop: make(chan struct{}), attachEnabled: config.Attach, networkIP: config.NetworkIP}
 	s.sessions[config.ID] = item
 	s.mu.Unlock()
 	if config.Attach {
@@ -122,7 +136,9 @@ func (s *runtimeServer) Start(_ context.Context, request *runtimev1.RunRequest) 
 	}
 	go func() {
 		err := s.managed(ctx, config, func(process container.StartedProcess) {
+			item.attachMu.Lock()
 			item.pid = process.PID
+			item.attachMu.Unlock()
 			if config.Attach {
 				item.stdin = process.Stdin
 				if config.TTY {
@@ -131,8 +147,8 @@ func (s *runtimeServer) Start(_ context.Context, request *runtimev1.RunRequest) 
 				item.output = make(chan *runtimev1.AttachOutput, 256)
 				item.tty = config.TTY
 				item.outputWG.Add(2)
-				go relayOutput(process.Stdout, 1, item.output, &item.outputWG)
-				go relayOutput(process.Stderr, 2, item.output, &item.outputWG)
+				go relayOutput(process.Stdout, 1, item.output, item.outputStop, &item.outputWG)
+				go relayOutput(process.Stderr, 2, item.output, item.outputStop, &item.outputWG)
 			}
 			close(item.started)
 		})
@@ -153,6 +169,10 @@ func (s *runtimeServer) Start(_ context.Context, request *runtimev1.RunRequest) 
 		item.attachMu.Unlock()
 		if attached && waited {
 			s.removeSession(item)
+		} else if !waited {
+			// Java may have restarted or disconnected before consuming Wait.
+			// Keep a grace period for reconciliation, then bound stale sessions.
+			time.AfterFunc(10*time.Minute, func() { s.removeSessionIfUnwaited(item) })
 		}
 	}()
 	<-item.started
@@ -193,6 +213,106 @@ func (s *runtimeServer) Stop(_ context.Context, request *runtimev1.StopRequest) 
 	}
 	item.cancel()
 	return &runtimev1.StopResponse{Stopped: true}, nil
+}
+
+func (s *runtimeServer) ListActiveContainers(context.Context, *runtimev1.ListActiveContainersRequest) (*runtimev1.ListActiveContainersResponse, error) {
+	s.mu.Lock()
+	items := make([]*session, 0, len(s.sessions))
+	for _, item := range s.sessions {
+		items = append(items, item)
+	}
+	s.mu.Unlock()
+	response := &runtimev1.ListActiveContainersResponse{}
+	for _, item := range items {
+		select {
+		case <-item.done:
+			continue
+		default:
+		}
+		item.attachMu.Lock()
+		pid := item.pid
+		item.attachMu.Unlock()
+		if pid <= 0 {
+			continue
+		}
+		if err := unix.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
+			continue
+		}
+		response.Containers = append(response.Containers, &runtimev1.ActiveContainer{Id: item.id, Pid: int32(pid), NetworkIp: item.networkIP})
+	}
+	return response, nil
+}
+
+func (s *runtimeServer) GetContainerLogs(_ context.Context, request *runtimev1.GetContainerLogsRequest) (*runtimev1.GetContainerLogsResponse, error) {
+	id := request.GetId()
+	if !validContainerID(id) {
+		return nil, status.Error(codes.InvalidArgument, "invalid container id")
+	}
+	path := filepath.Join(s.logRoot, id, "container.log")
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, status.Error(codes.NotFound, "container log not found")
+		}
+		return nil, status.Errorf(codes.Internal, "open container log: %v", err)
+	}
+	file := os.NewFile(uintptr(fd), "minidock-container-log")
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, status.Error(codes.Internal, "open container log returned an invalid file descriptor")
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "stat container log: %v", err)
+	}
+	if request.GetOffset() > uint64(info.Size()) {
+		return nil, status.Error(codes.OutOfRange, "log offset exceeds log size")
+	}
+	limit := request.GetLimit()
+	if limit > 1024*1024 {
+		return nil, status.Error(codes.InvalidArgument, "log range limit cannot exceed 1 MiB")
+	}
+	if limit == 0 {
+		limit = 1024 * 1024
+	}
+	remaining := uint64(info.Size()) - request.GetOffset()
+	if limit > remaining {
+		limit = remaining
+	}
+	data := make([]byte, int(limit))
+	if len(data) != 0 {
+		if _, err := file.ReadAt(data, int64(request.GetOffset())); err != nil && !errors.Is(err, io.EOF) {
+			return nil, status.Errorf(codes.Internal, "read container log: %v", err)
+		}
+	}
+	return &runtimev1.GetContainerLogsResponse{Data: data, Size: uint64(info.Size())}, nil
+}
+
+func validContainerID(id string) bool {
+	if id == "" || id == "." || id == ".." || len(id) > 64 {
+		return false
+	}
+	for _, char := range id {
+		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' || char == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+func containerRoot() string {
+	if configured := os.Getenv("MINIDOCK_CONTAINERS_DIR"); configured != "" {
+		absolute, err := filepath.Abs(configured)
+		if err == nil {
+			return filepath.Clean(absolute)
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "/var/lib/minidock/containers"
+	}
+	return filepath.Join(home, ".local", "share", "minidock", "containers")
 }
 
 func (s *runtimeServer) Attach(stream grpc.ServerStream) error {
@@ -308,11 +428,24 @@ func (s *runtimeServer) removeSessionIfUnattached(item *session) {
 	if removed {
 		// An attach-enabled process that never gets a client must not remain
 		// blocked forever on its bounded output queue.
+		item.stopOutput()
 		item.cancel()
 	}
 }
 
-func relayOutput(reader io.ReadCloser, streamID int32, output chan<- *runtimev1.AttachOutput, wait *sync.WaitGroup) {
+func (s *runtimeServer) removeSessionIfUnwaited(item *session) {
+	item.attachMu.Lock()
+	defer item.attachMu.Unlock()
+	if item.waited {
+		return
+	}
+	s.removeSession(item)
+}
+
+func (item *session) stopOutput() { item.outputStopOnce.Do(func() { close(item.outputStop) }) }
+
+func relayOutput(reader io.ReadCloser, streamID int32, output chan<- *runtimev1.AttachOutput,
+	stop <-chan struct{}, wait *sync.WaitGroup) {
 	defer wait.Done()
 	if reader == nil {
 		return
@@ -325,7 +458,11 @@ func relayOutput(reader io.ReadCloser, streamID int32, output chan<- *runtimev1.
 			chunk := &runtimev1.AttachOutput{Stream: streamID, Data: append([]byte(nil), buffer[:count]...)}
 			// Preserve every byte. Backpressure is preferable to silently
 			// corrupting an interactive session when the client is slow to read.
-			output <- chunk
+			select {
+			case output <- chunk:
+			case <-stop:
+				return
+			}
 		}
 		if err != nil {
 			return
@@ -348,6 +485,7 @@ func (s *runtimeServer) shutdown() {
 	items := make([]*session, 0, len(s.sessions))
 	for _, item := range s.sessions {
 		items = append(items, item)
+		item.stopOutput()
 		item.cancel()
 	}
 	s.mu.Unlock()
@@ -357,7 +495,7 @@ func (s *runtimeServer) shutdown() {
 }
 
 func configFromRequest(request *runtimev1.RunRequest) container.Config {
-	return container.Config{ID: request.GetId(), RootFS: request.GetRootfs(), Command: request.GetCommand(), Env: request.GetEnv(), Hostname: request.GetHostname(), MemoryMax: request.GetMemoryMax(), CPUQuota: request.GetCpuQuota(), CPUPeriod: request.GetCpuPeriod(), Network: request.GetNetwork(), NetworkIP: request.GetNetworkIp(), Attach: request.GetAttach(), TTY: request.GetTty()}
+	return container.Config{ID: request.GetId(), RootFS: request.GetRootfs(), Command: request.GetCommand(), Env: request.GetEnv(), Hostname: request.GetHostname(), MemoryMax: request.GetMemoryMax(), CPUQuota: request.GetCpuQuota(), CPUPeriod: request.GetCpuPeriod(), Network: request.GetNetwork(), NetworkIP: request.GetNetworkIp(), Attach: request.GetAttach(), TTY: request.GetTty(), LogPath: request.GetLogPath()}
 }
 
 func responseForError(ctx context.Context, err error) (*runtimev1.RunResponse, error) {
@@ -413,6 +551,20 @@ func stopHandler(srv any, ctx context.Context, decode func(any) error, intercept
 	}
 	return invoke(srv, ctx, interceptor, "/"+serviceName+"/Stop", func(ctx context.Context) (any, error) { return srv.(runtimeService).Stop(ctx, request) }, request)
 }
+func listActiveHandler(srv any, ctx context.Context, decode func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	request := new(runtimev1.ListActiveContainersRequest)
+	if err := decode(request); err != nil {
+		return nil, err
+	}
+	return invoke(srv, ctx, interceptor, "/"+serviceName+"/ListActiveContainers", func(ctx context.Context) (any, error) { return srv.(runtimeService).ListActiveContainers(ctx, request) }, request)
+}
+func getContainerLogsHandler(srv any, ctx context.Context, decode func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	request := new(runtimev1.GetContainerLogsRequest)
+	if err := decode(request); err != nil {
+		return nil, err
+	}
+	return invoke(srv, ctx, interceptor, "/"+serviceName+"/GetContainerLogs", func(ctx context.Context) (any, error) { return srv.(runtimeService).GetContainerLogs(ctx, request) }, request)
+}
 
 func attachHandler(srv any, stream grpc.ServerStream) error {
 	return srv.(runtimeService).Attach(stream)
@@ -448,6 +600,16 @@ func (c *RuntimeClient) Wait(ctx context.Context, request *runtimev1.WaitRequest
 func (c *RuntimeClient) Stop(ctx context.Context, request *runtimev1.StopRequest) (*runtimev1.StopResponse, error) {
 	response := new(runtimev1.StopResponse)
 	err := c.connection.Invoke(ctx, "/"+serviceName+"/Stop", request, response)
+	return response, err
+}
+func (c *RuntimeClient) ListActiveContainers(ctx context.Context) (*runtimev1.ListActiveContainersResponse, error) {
+	response := new(runtimev1.ListActiveContainersResponse)
+	err := c.connection.Invoke(ctx, "/"+serviceName+"/ListActiveContainers", &runtimev1.ListActiveContainersRequest{}, response)
+	return response, err
+}
+func (c *RuntimeClient) GetContainerLogs(ctx context.Context, request *runtimev1.GetContainerLogsRequest) (*runtimev1.GetContainerLogsResponse, error) {
+	response := new(runtimev1.GetContainerLogsResponse)
+	err := c.connection.Invoke(ctx, "/"+serviceName+"/GetContainerLogs", request, response)
 	return response, err
 }
 
