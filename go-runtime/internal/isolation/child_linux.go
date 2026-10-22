@@ -11,9 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
+	"golang.org/x/sys/unix"
 	"mini-docker/go-runtime/internal/cgroups"
 	"mini-docker/go-runtime/internal/container"
 	"mini-docker/go-runtime/internal/network"
@@ -22,19 +24,20 @@ import (
 
 const childEnv = "MINIDOCK_INTERNAL_CHILD"
 
-var namespaceTypes = []string{"pid", "mnt", "net", "uts", "ipc"}
+var namespaceTypes = []string{"user", "pid", "mnt", "net", "uts", "ipc"}
 
 // ChildStarter re-executes the current binary with a fresh set of Linux
 // namespaces. The child remains blocked until Release is called by Exec.
 type ChildStarter struct {
 	CgroupRoot string
+	LogRoot    string
 	Network    *network.BridgeManager
 }
 
 // StartPaused creates the child in fresh PID, mount, network, UTS, and IPC
 // namespaces. It does not require a privileged command; Linux permissions
 // determine whether the kernel permits these namespaces for this caller.
-func (ChildStarter) StartPaused(ctx context.Context, config container.Config) (container.Child, error) {
+func (starter ChildStarter) StartPaused(ctx context.Context, config container.Config) (container.Child, error) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("create child release pipe: %w", err)
@@ -48,6 +51,7 @@ func (ChildStarter) StartPaused(ctx context.Context, config container.Config) (c
 	cmd := exec.CommandContext(ctx, os.Args[0])
 	child := &Child{cmd: cmd}
 	var inherited []*os.File
+	var logFile *os.File
 	if config.TTY {
 		child.pty, err = openPTY()
 		if err != nil {
@@ -116,13 +120,49 @@ func (ChildStarter) StartPaused(ctx context.Context, config container.Config) (c
 		}
 	} else {
 		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		if config.LogPath != "" {
+			root := starter.LogRoot
+			if root == "" {
+				root = defaultContainerRoot()
+			}
+			want, pathErr := filepath.Abs(filepath.Join(root, config.ID, "container.log"))
+			got, gotErr := filepath.Abs(config.LogPath)
+			if pathErr != nil || gotErr != nil || filepath.Clean(got) != filepath.Clean(want) {
+				_ = r.Close()
+				_ = w.Close()
+				_ = readyR.Close()
+				_ = readyW.Close()
+				return nil, errors.New("log path must be the container's configured container.log")
+			}
+			logDir := filepath.Dir(want)
+			logDirInfo, dirErr := os.Lstat(logDir)
+			if dirErr != nil || !logDirInfo.IsDir() || logDirInfo.Mode()&os.ModeSymlink != 0 {
+				_ = r.Close()
+				_ = w.Close()
+				_ = readyR.Close()
+				_ = readyW.Close()
+				return nil, errors.New("container log directory must be a real directory")
+			}
+			logFD, openErr := unix.Open(want, unix.O_WRONLY|unix.O_CREAT|unix.O_APPEND|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
+			if openErr != nil {
+				_ = r.Close()
+				_ = w.Close()
+				_ = readyR.Close()
+				_ = readyW.Close()
+				return nil, fmt.Errorf("open container log: %w", openErr)
+			}
+			logFile = os.NewFile(uintptr(logFD), "minidock-container-log")
+			cmd.Stdout, cmd.Stderr = logFile, logFile
+		} else {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+		}
 	}
 	cmd.Env = append(os.Environ(), childEnv+"=1")
 	cmd.ExtraFiles = []*os.File{r, readyW}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET | syscall.CLONE_NEWUTS | syscall.CLONE_NEWIPC,
+		Pdeathsig:                  syscall.SIGKILL,
 		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
 		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
 		GidMappingsEnableSetgroups: false,
@@ -131,6 +171,9 @@ func (ChildStarter) StartPaused(ctx context.Context, config container.Config) (c
 		cmd.SysProcAttr.Setsid, cmd.SysProcAttr.Setctty, cmd.SysProcAttr.Ctty = true, true, 0
 	}
 	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
 		for _, file := range inherited {
 			_ = file.Close()
 		}
@@ -155,6 +198,9 @@ func (ChildStarter) StartPaused(ctx context.Context, config container.Config) (c
 	for _, file := range inherited {
 		_ = file.Close()
 	}
+	if logFile != nil {
+		_ = logFile.Close()
+	}
 	if child.pty != nil && child.pty.slave != nil {
 		_ = child.pty.slave.Close()
 		child.pty.slave = nil
@@ -169,6 +215,17 @@ func (ChildStarter) StartPaused(ctx context.Context, config container.Config) (c
 		return nil, err
 	}
 	return child, nil
+}
+
+func defaultContainerRoot() string {
+	if configured := os.Getenv("MINIDOCK_CONTAINERS_DIR"); configured != "" {
+		return filepath.Clean(configured)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "/var/lib/minidock/containers"
+	}
+	return filepath.Join(home, ".local", "share", "minidock", "containers")
 }
 
 // AttachCgroup applies requested resource limits in cgroups v2. With no
@@ -295,6 +352,7 @@ func (c *Child) verifyNamespaces() error {
 // ChildStarter. It reads the config from fd 3, then replaces itself with the
 // requested executable. The caller should exit with the returned status.
 func RunChild() (int, error) {
+	runtime.LockOSThread()
 	if os.Getenv(childEnv) != "1" {
 		return 0, errors.New("not a minidock namespace child")
 	}
@@ -331,6 +389,9 @@ func RunChild() (int, error) {
 		if err := rootfs.Enter(config.RootFS); err != nil {
 			return 1, fmt.Errorf("enter container rootfs: %w", err)
 		}
+	}
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return 1, fmt.Errorf("set no_new_privs: %w", err)
 	}
 	path, err := exec.LookPath(config.Command[0])
 	if err != nil {
