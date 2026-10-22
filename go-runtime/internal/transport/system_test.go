@@ -13,12 +13,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	runtimev1 "mini-docker/go-runtime/gen/runtime/v1"
 	"mini-docker/go-runtime/internal/cgroups"
@@ -87,7 +90,7 @@ func TestGoRuntimeEndToEnd(t *testing.T) {
 	response, err := NewRuntimeClient(conn).Run(ctx, &runtimev1.RunRequest{
 		Id:        "system-test",
 		Rootfs:    rootfs,
-		Command:   []string{"/bin/busybox", "sh", "-c", "test ! -e /etc/passwd"},
+		Command:   []string{"/bin/busybox", "sh", "-c", "test ! -e /etc/passwd && test -c /dev/null && /bin/busybox grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/self/status"},
 		MemoryMax: 64 << 20,
 		CpuQuota:  50000,
 		CpuPeriod: 100000,
@@ -279,6 +282,58 @@ func TestAttachRelaysInputAndOutput(t *testing.T) {
 	}
 	if _, err := client.Wait(context.Background(), &runtimev1.WaitRequest{Id: request.GetId()}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestListActiveContainersReportsLiveSessions(t *testing.T) {
+	item := &session{id: "container-a", pid: os.Getpid(), networkIP: "10.0.0.2", done: make(chan struct{})}
+	server := &runtimeServer{sessions: map[string]*session{item.id: item}}
+	response, err := server.ListActiveContainers(context.Background(), &runtimev1.ListActiveContainersRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.GetContainers()) != 1 || response.GetContainers()[0].GetId() != item.id || int(response.GetContainers()[0].GetPid()) != item.pid {
+		t.Fatalf("unexpected active session response: %#v", response.GetContainers())
+	}
+}
+
+func TestGetContainerLogsSupportsBoundedOffsets(t *testing.T) {
+	root := t.TempDir()
+	containerDir := filepath.Join(root, "container-a")
+	if err := os.Mkdir(containerDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(containerDir, "container.log"), []byte("abcdef"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := &runtimeServer{logRoot: root}
+	response, err := server.GetContainerLogs(context.Background(), &runtimev1.GetContainerLogsRequest{Id: "container-a", Offset: 2, Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(response.GetData(), []byte("cde")) || response.GetSize() != 6 {
+		t.Fatalf("unexpected log slice %q of size %d", response.GetData(), response.GetSize())
+	}
+	if _, err := server.GetContainerLogs(context.Background(), &runtimev1.GetContainerLogsRequest{Id: "../outside"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("path traversal id should be rejected, got %v", err)
+	}
+}
+
+func TestRelayOutputUnblocksWhenSessionStops(t *testing.T) {
+	reader := io.NopCloser(strings.NewReader(strings.Repeat("x", 96*1024)))
+	output := make(chan *runtimev1.AttachOutput, 1)
+	stop := make(chan struct{})
+	var wait sync.WaitGroup
+	wait.Add(1)
+	go relayOutput(reader, 1, output, stop, &wait)
+	time.Sleep(10 * time.Millisecond)
+	close(stop)
+	done := make(chan struct{})
+	go func() { wait.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("output relay remained blocked after its session stopped")
 	}
 }
 
