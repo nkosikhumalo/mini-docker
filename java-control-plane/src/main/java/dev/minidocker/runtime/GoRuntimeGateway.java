@@ -8,6 +8,8 @@ import dev.minidocker.runtime.v1.RuntimeServiceGrpc;
 import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;
 import dev.minidocker.runtime.v1.StartResponse;
+import dev.minidocker.runtime.v1.ListActiveContainersRequest;
+import dev.minidocker.runtime.v1.GetContainerLogsRequest;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.netty.channel.EventLoopGroup;
 import io.grpc.netty.shaded.io.netty.channel.epoll.Epoll;
@@ -59,6 +61,7 @@ public class GoRuntimeGateway implements RuntimeGateway {
                 .setNetworkIp(config.networkIp())
                 .setAttach(config.attach())
                 .setTty(config.tty())
+                .setLogPath(config.logPath())
                 .build();
         StartResponse started;
         try {
@@ -68,15 +71,39 @@ public class GoRuntimeGateway implements RuntimeGateway {
             throw new IllegalStateException("Go runtime failed to start container " + config.id() + ": "
                     + error.getStatus().getDescription(), error);
         }
+        return execution(config.id(), started.getPid());
+    }
+
+    @Override
+    public java.util.List<ActiveContainer> listActive() {
+        var response = RuntimeServiceGrpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
+                .listActiveContainers(ListActiveContainersRequest.getDefaultInstance());
+        return response.getContainersList().stream()
+                .map(item -> new ActiveContainer(item.getId(), item.getPid(), item.getNetworkIp())).toList();
+    }
+
+    @Override
+    public LogChunk logs(String id, long offset, long limit) {
+        var response = RuntimeServiceGrpc.newBlockingStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
+                .getContainerLogs(GetContainerLogsRequest.newBuilder().setId(id).setOffset(offset).setLimit(limit).build());
+        return new LogChunk(response.getData().toByteArray(), response.getSize());
+    }
+
+    @Override
+    public Execution recover(String id, int pid) {
+        return execution(id, pid);
+    }
+
+    private Execution execution(String id, int pid) {
         CompletableFuture<RunResult> completion = CompletableFuture.supplyAsync(() -> {
             RunResponse response = RuntimeServiceGrpc.newBlockingStub(channel)
-                    .wait(WaitRequest.newBuilder().setId(config.id()).build());
+                    .wait(WaitRequest.newBuilder().setId(id).build());
             return new RunResult(response.getExitCode());
         });
         return new Execution() {
             @Override
             public int pid() {
-                return started.getPid();
+                return pid;
             }
 
             @Override
@@ -89,9 +116,9 @@ public class GoRuntimeGateway implements RuntimeGateway {
                 try {
                     RuntimeServiceGrpc.newBlockingStub(channel)
                             .withDeadlineAfter(5, TimeUnit.SECONDS)
-                            .stop(StopRequest.newBuilder().setId(config.id()).build());
+                            .stop(StopRequest.newBuilder().setId(id).build());
                 } catch (StatusRuntimeException error) {
-                    log.warn("Go runtime failed to stop container {}", config.id(), error);
+                    log.warn("Go runtime failed to stop container {}", id, error);
                 }
             }
         };
