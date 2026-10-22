@@ -26,6 +26,7 @@ type Config struct {
 	NetworkIP string   `json:"network_ip,omitempty"`
 	Attach    bool     `json:"attach,omitempty"`
 	TTY       bool     `json:"tty,omitempty"`
+	LogPath   string   `json:"log_path,omitempty"`
 }
 
 // Validate rejects incomplete or unsafe-to-interpret launch descriptions.
