@@ -25,6 +25,7 @@ test-java:
 
 # Run explicitly: root privileges may be needed for kernel namespaces and mounts.
 test-integration:
+	$(SUDO) ./scripts/verify-host.sh
 	cd go-runtime && $(SUDO) -E env GOCACHE=$(INTEGRATION_GO_CACHE) go test -count=1 -v ./...
 
 run-go: build-go
