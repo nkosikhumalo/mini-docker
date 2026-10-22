@@ -59,13 +59,21 @@ func main() {
 
 	server := grpc.NewServer()
 	networkManager := network.NewBridgeManager()
+	logRoot := os.Getenv("MINIDOCK_CONTAINERS_DIR")
+	if logRoot == "" {
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			log.Fatalf("resolve home directory for container logs: %v", homeErr)
+		}
+		logRoot = filepath.Join(home, ".local", "share", "minidock", "containers")
+	}
 	defer func() {
 		if err := networkManager.Close(); err != nil {
 			log.Printf("network cleanup: %v", err)
 		}
 	}()
 	shutdownRuntime := transport.RegisterManagedRuntime(server, func(ctx context.Context, cfg container.Config, started func(container.StartedProcess)) error {
-		return container.RunStarted(ctx, cfg, isolation.ChildStarter{Network: networkManager}, started)
+		return container.RunStarted(ctx, cfg, isolation.ChildStarter{Network: networkManager, LogRoot: logRoot}, started)
 	})
 	stopped := make(chan os.Signal, 1)
 	shutdownDone := make(chan struct{})
