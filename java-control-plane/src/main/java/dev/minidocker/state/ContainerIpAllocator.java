@@ -32,4 +32,22 @@ public class ContainerIpAllocator {
         String address = byContainer.remove(containerId);
         if (address != null) allocated.remove(address);
     }
+
+    /** Rebuilds IP leases from the daemon's authoritative active-session list. */
+    public synchronized void restoreActiveLeases(Map<String, String> active) {
+        byContainer.clear();
+        allocated.clear();
+        nextHost = 2;
+        for (var entry : active.entrySet()) {
+            String address = entry.getValue();
+            if (address == null || address.isBlank()) continue;
+            if (!address.matches("10\\.0\\.0\\.(?:[2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])")) {
+                throw new IllegalStateException("runtime reported an invalid container IP: " + address);
+            }
+            if (!allocated.add(address)) {
+                throw new IllegalStateException("runtime reported duplicate container IP lease: " + address);
+            }
+            byContainer.put(entry.getKey(), address);
+        }
+    }
 }
