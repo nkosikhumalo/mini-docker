@@ -57,21 +57,46 @@ persists lifecycle snapshots atomically to `state.json`; override that path
 with `MINIDOCK_STATE_FILE`. A sibling lock file prevents a second Java control
 plane from writing the same state file. At startup Java reconciles saved records and IP
 leases with the Go daemon's active-session list. Detached stdout/stderr is kept
-in each container directory as `container.log`; logs remain after the rootfs
-is removed. Set `MINIDOCK_CONTAINERS_DIR` for both Java and Go if they run with
+in each container directory as `container.log`, capped at 10 MiB with a
+truncation marker; logs remain after the rootfs is removed. Set
+`MINIDOCK_CONTAINERS_DIR` for both Java and Go if they run with
 different home directories.
 
 The Go runtime requires Linux. Namespace creation and mounts depend on host
-kernel policy. CPU and memory limits require a writable delegated cgroups v2
-hierarchy; set `MINIDOCK_CGROUP_ROOT` to its MiniDock subdirectory. Container
-networking requires `iproute2`, `nsenter`, `iptables`, and permission to create
-bridge/veth devices and change IPv4 forwarding. MiniDock adds masquerade and
-forwarding rules for `10.0.0.0/24`, then removes its rules and restores the
+kernel policy. At daemon startup, MiniDock reports whether it is running as
+root, whether cgroups v2 CPU/memory controllers are visible, and whether the
+networking tools are installed. These checks are diagnostic: basic
+no-network/no-limits containers may work as an ordinary user when the kernel
+allows user namespaces. CPU and memory limits require a writable delegated
+cgroups v2 hierarchy; set `MINIDOCK_CGROUP_ROOT` to its MiniDock subdirectory.
+Container networking requires `iproute2`, `nsenter`, `iptables`, and permission
+to create bridge/veth devices and change IPv4 forwarding. Missing tools are
+reported with Debian/Ubuntu package hints at startup. MiniDock adds masquerade
+and forwarding rules for `10.0.0.0/24`, then removes its rules and restores the
 previous forwarding setting on normal daemon shutdown.
+
+### Host compatibility
+
+MiniDock is Linux-only. The real namespace, mount, cgroup, bridge/veth, and
+firewall path has passed once on the project's Zorin OS development host; its
+exact release and kernel version were not recorded. Ubuntu, Debian, Fedora, and
+other distributions have not been verified yet. A successful preflight does
+not guarantee that the host permits namespace creation, mounts, cgroup
+delegation, or network administration.
+
+AppArmor or SELinux policy can deny these operations even when the daemon is
+root. If startup reports `operation not permitted`, inspect the system journal
+and the relevant security audit logs for a policy denial. Apply a narrow local
+policy adjustment for the MiniDock executable and required operations; do not
+disable SELinux or put the host's AppArmor profile into complain mode as a
+general workaround.
 
 The Java-to-Go contract is protobuf gRPC over the local Unix socket. Go's
 `Start`, `Wait`, `Stop`, `ListActiveContainers`, and `GetContainerLogs`
 operations let Java acknowledge startup with a PID, wait for exit status,
 stop workloads, reconcile state, and retrieve bounded log ranges. Run
-`make test-integration` on a Linux host with the required privileges after
-`make test` passes.
+`make test-integration` runs the privileged host preflight and the existing Go
+integration checks. For real namespace, mount, cgroups v2, bridge/veth, and
+firewall setup, use `make e2e` on a disposable Linux host with a delegated
+cgroup v2 subtree configured in `MINIDOCK_CGROUP_ROOT`. The e2e target refuses
+to run if `minidock0` or a route for `10.0.0.0/24` already exists.
