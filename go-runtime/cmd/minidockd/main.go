@@ -7,17 +7,49 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
+	"mini-docker/go-runtime/internal/cgroups"
 	"mini-docker/go-runtime/internal/container"
 	"mini-docker/go-runtime/internal/isolation"
 	"mini-docker/go-runtime/internal/network"
 	"mini-docker/go-runtime/internal/transport"
 )
+
+// logHostPreflight reports host capabilities before accepting requests. Some
+// requirements are feature-specific, so missing optional networking or cgroup
+// support should not prevent no-network, no-limits containers from running.
+func logHostPreflight() {
+	if runtime.GOOS != "linux" {
+		log.Fatalf("MiniDock requires Linux; current operating system is %s", runtime.GOOS)
+	}
+	if os.Geteuid() != 0 {
+		log.Printf("host preflight: daemon is not root; user namespaces may allow basic containers, but cgroup limits and bridge networking may require elevated host permissions")
+	}
+	controllers, err := os.ReadFile("/sys/fs/cgroup/cgroup.controllers")
+	if err != nil {
+		log.Printf("host preflight: cgroups v2 not detected at /sys/fs/cgroup/cgroup.controllers; CPU/memory limits will be unavailable: %v", err)
+	} else {
+		available := " " + strings.TrimSpace(string(controllers)) + " "
+		for _, controller := range []string{"cpu", "memory"} {
+			if !strings.Contains(available, " "+controller+" ") {
+				log.Printf("host preflight: cgroups v2 controller %q is unavailable; requests using that limit will fail", controller)
+			}
+		}
+	}
+	for _, name := range []string{"ip", "nsenter", "iptables"} {
+		if _, err := exec.LookPath(name); err != nil {
+			log.Printf("host preflight: %q is not installed; container networking is unavailable (Debian/Ubuntu packages: iproute2 iptables; nsenter is provided by util-linux)", name)
+		}
+	}
+}
 
 func main() {
 	if isolation.IsChild() {
@@ -26,6 +58,14 @@ func main() {
 			log.Printf("namespace child: %v", err)
 		}
 		os.Exit(status)
+	}
+	logHostPreflight()
+	cgroupRoot := os.Getenv("MINIDOCK_CGROUP_ROOT")
+	if cgroupRoot == "" {
+		cgroupRoot = "/sys/fs/cgroup/minidock"
+	}
+	if err := cgroups.RemoveEmptyGroups(cgroupRoot); err != nil {
+		log.Printf("startup cgroup recovery: %v", err)
 	}
 	socket := os.Getenv("MINIDOCK_SOCKET")
 	if socket == "" {
