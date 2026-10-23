@@ -9,7 +9,7 @@ MiniDock is a deliberately small Linux learning project: it stages a rootfs tarb
 - **Java control plane** (`java-control-plane`): accepts HTTP requests and CLI calls, validates container requests, stores/extracts images, assigns container IDs and IPs, persists lifecycle metadata, and asks Go to run/stop containers.
 - **Go runtime daemon** (`go-runtime`, executable `minidockd`): receives local gRPC requests, creates Linux isolation and resource controls, launches the command, and reports its PID, exit status, and logs.
 
-The Java API defaults to `127.0.0.1:8080`. Java and Go communicate over a Unix domain socket, default `/tmp/minidock-runtime.sock`, using protobuf gRPC. Keep new work proportional to this project's mini scope: implement what the documented local workflow needs, and avoid Docker-compatible features or complexity unless the project explicitly chooses to expand.
+The Java API is bound to `127.0.0.1:8080`. Java and Go communicate over a Unix domain socket, default `/tmp/minidock-runtime.sock`, using protobuf gRPC. Keep new work proportional to this project's mini scope: implement what the documented local workflow needs, and avoid Docker-compatible features or complexity unless the project explicitly chooses to expand.
 
 ## 2. Repository map
 
@@ -41,7 +41,7 @@ These are the concrete additions that a new maintainer may otherwise mistake for
 
 - Added Java JSON snapshot persistence for container views. Each snapshot is written to a same-directory temporary file, flushed, and atomically moved into place; the control plane holds a state-file lock so a second Java instance cannot write the same snapshot concurrently.
 - Added daemon `ListActiveContainers` support and Java startup reconciliation. Java now restores leases, reconnects `Wait` monitoring for sessions still owned by Go, marks stale saved records no longer active, and adds records for live Go sessions absent from Java's snapshot.
-- Added `log_path` to the runtime RPC contract. Detached Go processes write stdout and stderr to the per-container `container.log`; Go serves bounded log reads, Java proxies them over HTTP, and the CLI has a `logs` command.
+- Added `log_path` to the runtime RPC contract. Detached Go processes write stdout and stderr to the per-container `container.log`; each log is now capped at 10 MiB with a truncation marker, Go serves bounded log reads, Java proxies them over HTTP, and the CLI has a `logs` command.
 - Added baseline child hardening: `no_new_privs`, `nosuid`/`nodev` root mount flags, read-only restrictive `/proc`, and a private minimal `/dev` plus `devpts` setup.
 - Added/updated Go integration and transport checks, the host preflight script, Makefile targets, and handover-oriented READMEs.
 
@@ -121,14 +121,21 @@ The privileged integration target is:
 make test-integration
 ```
 
-It invokes `sudo scripts/verify-host.sh` followed by Go tests. Run it from an interactive Linux host terminal where sudo can authenticate. The preflight checks cgroup v2 CPU/memory controllers, required network tools, and IPv4 forwarding access. The current end-to-end test attempts real namespace and mount setup when permitted, but it uses a temporary fake cgroup filesystem and a mocked network command runner. It does **not** verify writing limits to the host's delegated cgroup hierarchy or creating a real bridge/veth and firewall rules.
+It invokes `sudo scripts/verify-host.sh` followed by the Go checks. These checks include a kernel-dependent namespace/rootfs path, but the existing system test still uses a fake cgroup filesystem and mocked network commands.
+
+For actual host cgroup, bridge/veth, and firewall setup, use the separate opt-in target:
+
+```sh
+MINIDOCK_CGROUP_ROOT=/sys/fs/cgroup/minidock-e2e make e2e
+```
+
+Run it on a disposable Linux host with sudo available and `MINIDOCK_CGROUP_ROOT` pointing to an existing dedicated delegated cgroups v2 subtree with CPU and memory controllers enabled. The script checks host prerequisites and refuses to run if `minidock0` already exists or `10.0.0.0/24` is already routed. The integration test creates and cleans its own bridge, veth, firewall rules, cgroup, and temporary rootfs on normal test completion. The target passed on the target host on 2026-10-22. Do not use this target on a machine where those host-global changes are unacceptable.
 
 ## 6. Configuration and storage
 
 | Setting | Default | Used by |
 | --- | --- | --- |
 | `MINIDOCK_SOCKET` | `/tmp/minidock-runtime.sock` | Java client and Go daemon; must match. |
-| `MINIDOCK_API_ADDRESS` | `127.0.0.1` | Java HTTP bind address. |
 | `MINIDOCK_IMAGES_DIR` | `${user.home}/.local/share/minidock/images` | Java image archives. |
 | `MINIDOCK_CONTAINERS_DIR` | `${user.home}/.local/share/minidock/containers` | Java rootfs/log storage and Go detached logs. Set identically if Java and Go have different home directories. |
 | `MINIDOCK_STATE_FILE` | `${user.home}/.local/share/minidock/state.json` | Java lifecycle snapshots; the sibling `.lock` file enforces one control-plane writer. |
@@ -142,7 +149,7 @@ The Go child uses user, PID, mount, network, UTS, and IPC namespaces. The re-exe
 
 The root filesystem is bind-mounted with `nosuid` and `nodev`, then installed as the process root with `pivot_root`; the old root is detached. `/proc` is mounted read-only with `nosuid`, `noexec`, and `nodev`. `/dev` is a private tmpfs with selected device files and private `devpts`. These are useful baseline restrictions, but the rootfs remains writable and the runtime does not yet implement a complete capability drop, seccomp policy, LSM profile, user-ID mapping policy, or comprehensive syscall/filesystem attack-surface reduction.
 
-CPU and memory limits rely on cgroups v2. Network mode relies on Linux bridge/veth support and host network administration privileges. The network package installs forwarding/masquerade rules for its configured subnet and attempts to undo its owned rules and restore forwarding state on normal shutdown. A forced host/daemon crash can bypass normal cleanup; inspect host firewall and forwarding state after interrupted experiments.
+CPU and memory limits rely on cgroups v2. Network mode relies on Linux bridge/veth support and host network administration privileges. The network package installs forwarding/masquerade rules for its configured subnet and attempts to undo its owned rules and restore forwarding state on normal shutdown. At daemon startup, MiniDock removes empty per-container cgroups from its configured subtree; populated cgroups are preserved. A forced host/daemon crash can still leave host veths, firewall rules, forwarding state, and rootfs temporary directories. MiniDock does not automatically sweep these host network resources because interface names alone do not prove ownership; inspect host state after interrupted experiments.
 
 Do development on a disposable VM or otherwise controlled Linux machine. Avoid testing as root against arbitrary paths. Use a dedicated rootfs archive and the configured MiniDock data/cgroup directories.
 
@@ -150,32 +157,50 @@ Do development on a disposable VM or otherwise controlled Linux machine. Avoid t
 
 The latest implementation pass completed these checks:
 
-- `go test -count=1 ./...` and `go vet ./...` successfully in the development environment.
-- Maven package build successfully (`./mvnw -q -Dmaven.repo.local=/tmp/minidock-maven-cache -DskipTests package`). This compiles Java but skips Java tests.
+- `make test` passed the Go test suite and `go vet`; its first Maven invocation could not write to the default read-only `~/.m2`, then `./mvnw -Dmaven.repo.local=/tmp/minidock-maven-cache test` compiled Java successfully. Maven found no Java test sources.
+- `make build-go` built both Go binaries.
+- A combined local smoke run started `minidockd` and the Spring Boot control plane, confirmed Java connected to Go over gRPC, and received `200` from both image and container list APIs.
 - Shell syntax checks, `git diff --check`, and `make -n test-integration` successfully.
 
-The privileged `make test-integration` run was attempted but could not start because sudo could not obtain a password/non-interactive terminal in the development environment. Therefore real host namespace/mount/devpts/cgroup/network execution remains unverified on the target Zorin/Linux host. Rootless Go tests skip the kernel-dependent end-to-end test when the environment returns permission errors; a skip is not proof that host isolation works.
+The real-host `make e2e` test subsequently passed on the target Zorin OS host on 2026-10-22, exercising the namespace/rootfs, cgroup, bridge/veth, and firewall setup/normal-cleanup path. This is one successful host run, not broad distro compatibility coverage; forced-termination behavior is not covered.
 
 ### Must resolve or verify before relying on end-to-end operation
 
 | Priority | Issue | Effect if unresolved | Next maintainer action |
 | --- | --- | --- | --- |
-| **P0: namespace/rootfs host verification** | The full kernel end-to-end test has not passed on the target Linux host. Namespace creation, `pivot_root`, and `/proc`/`/dev` mounts depend on host kernel policy and permissions. | `run` can fail before starting the requested process. Unit tests and skipped integration tests cannot establish this works on Zorin. | Run `make test-integration` from an interactive terminal with sudo on a disposable Linux VM/host. Fix each actual failure and rerun until the namespace/rootfs portion passes; record any unsupported host restriction explicitly. |
-| **P0: real cgroup/network verification** | The current system test fakes cgroup files and mocks network commands. The host script checks prerequisites but does not attempt to create a cgroup, bridge, veth, or firewall rule. | CPU/memory limits or container networking may fail in actual use even if `make test` passes. | Add a separate opt-in privileged test on a disposable host that creates a temporary delegated cgroup and a real bridge/veth, verifies controls/routes, and reliably removes every resource. Then run it on Zorin. |
+| **RESOLVED 2026-10-22: namespace/rootfs host verification** | The privileged namespace/rootfs path passed as part of `make e2e` on the target host. Namespace creation, `pivot_root`, and `/proc`/`/dev` mounts remain dependent on host kernel and security policy. | One host configuration is verified; other distro and policy combinations may still reject operations. | Repeat `make e2e` on each additional supported host configuration before claiming compatibility. |
+| **RESOLVED 2026-10-22: real cgroup/network verification** | The dedicated `make e2e` test passed on the target host, exercising real cgroup writes and bridge/veth/firewall setup. The existing general system test still uses fake cgroup files and mocked network commands. | The privileged path has passed once on the target host; repeat after changes to host integration. | Re-run `MINIDOCK_CGROUP_ROOT=... make e2e` on a controlled Linux host after changes to cgroups or network setup. |
 | **P0: shared runtime settings** | Java and Go must use the same socket path; detached logs require both to resolve the same containers directory. Socket mode is `0660`, so filesystem ownership/group access also matters. | Java cannot call Go, or log retrieval reports missing files even though Go wrote them. | Start both as compatible users, set matching `MINIDOCK_SOCKET`, and set the same `MINIDOCK_CONTAINERS_DIR` whenever home directories differ. Verify the socket and directory permissions. |
-| **P0: host prerequisites** | Real kernel operation requires Linux namespace/mount support; requested limits require writable cgroup v2 CPU/memory controls; networking requires `ip`, `nsenter`, `iptables`, bridge/veth support, forwarding access, and network administration capability. The preflight only checks some prerequisites. | Depending on requested options, startup fails; CPU/memory limits or outbound networking cannot be provided. | Run `scripts/verify-host.sh`, then check the exact cgroup delegation and capabilities from the daemon's execution context. Do not infer that `sudo` alone bypasses container/AppArmor/host policy. |
-| **P1: failed-start and shutdown recovery** | Partial host setup and forced termination can interrupt normal cleanup; network forwarding/firewall state is host-global. | Stale bridge/veth/firewall state or temporary directories can remain and interfere with later runs. | Exercise failure injection at every setup step and forced shutdown on a disposable host; verify cleanup is idempotent and document safe recovery commands. |
+| **P1: host prerequisites and distro coverage** | Daemon startup now reports root status, visible cgroups v2 CPU/memory controllers, and whether `ip`, `nsenter`, and `iptables` are present. These are diagnostics because namespace-only operation can work without root, and cgroups/network are feature-specific. The real host path has only been exercised on the project's Zorin OS development host; its release/kernel version was not recorded. | Missing host support is reported early, but kernel/security-policy denials and delegated cgroup write access can still fail when a feature is requested. Other distributions remain unverified. | Use the actionable startup diagnostics, verify the delegated subtree for limits, and run `make e2e` before claiming support for another distro. Check system/audit logs for AppArmor or SELinux denials; do not globally disable host security policy as a workaround. |
+| **P1: forced-termination recovery** | Daemon startup now removes empty direct-child cgroups from its configured subtree and preserves populated groups. Host veth, firewall, forwarding, and temporary rootfs leftovers are not auto-swept because current state does not provide enough durable ownership information to distinguish stale MiniDock resources from unrelated host resources. | Those host resources can remain after SIGKILL or host crash and may interfere with later runs. | Add durable ownership metadata for MiniDock-created network resources, then build a conservative stale-resource recovery path; exercise forced termination and recovery on a disposable host. |
 
 ### Remaining work within MiniDock's intended scope
 
 - A local rootfs tarball workflow is the current image scope; Dockerfile builds, remote registries, OCI compatibility, image signatures, and other Docker product features are **out of scope**, not outstanding defects.
 - Java persistence is a JSON snapshot with a lifetime file lock to enforce one control-plane writer. It is not a multi-process database and has no transaction/query layer.
-- Detached logs are retrievable in chunks but have no rotation or size quota, so long-running noisy containers can consume disk space.
+- Detached logs are retained per container and retrievable in chunks. Each log is capped at 10 MiB; once full, further output is discarded and a truncation marker is written.
 - The system needs failure-injection and concurrent lifecycle tests: Java restart while Go stays up, Go restart during start, stop/start races, corrupt state file, extraction failures, log growth, and partial bridge setup.
 - Network forwarding/firewall setup is host-global and needs careful review and cleanup testing.
-- The API is designed for local use and binds to loopback by default. Keep it local for MiniDock's current workflow; remote multi-user access would require authentication and authorization.
+- The API is designed for local use and is forced to bind to loopback. It has no authentication or authorization; remote multi-user access would require adding access control and deliberately changing the binding guard.
 - Go's active session map is in memory. A daemon failure stops its namespace children through the parent-death signal; Java can reconcile stale records after restart, but container survival across a Go daemon failure is not part of the current MiniDock workflow.
 - The rootfs remains writable, and the namespace setup is basic isolation for learning and local workloads. Running hostile workloads is outside this project's intended use; production-grade security hardening is not a current requirement.
+
+### Source scan findings (2026-10-22)
+
+The following findings came from a source review of the Java API/control plane, Go runtime, CLI, image extraction, and network setup. They are implementation or operational risks within MiniDock's current scope; they do not imply that Docker product features are missing.
+
+| Priority | Finding | Effect | Suggested action within MiniDock's scope |
+| --- | --- | --- | --- |
+| **RESOLVED 2026-10-22: firewall rule ownership** | In `go-runtime/internal/network/bridge_linux.go`, the manager now records only rules it actually appended; an identical pre-existing rule is used but not claimed for deletion. | Normal shutdown no longer deletes a matching rule that predates this manager. | Keep ownership tracking intact and cover it with a fake-runner cleanup check when tests are next updated. |
+| **RESOLVED 2026-10-22: start deadline and cancellation** | Go's `runtimeServer.Start` now cancels and waits for setup rollback when the RPC context expires before startup acknowledgement. Java sends `Stop` and waits for `Wait` after a failed start before removing the extracted rootfs. If cleanup cannot be confirmed, Java retains the rootfs rather than deleting it under a possibly active setup. | Startup should no longer race rootfs deletion when the start call times out. This change has not yet been exercised with a slow-start or disconnect integration case. | Add a lifecycle regression case for start timeout/client disconnect when test work resumes; verify the cleanup wait and retained-rootfs fallback. |
+| **RESOLVED 2026-10-22: unauthenticated API exposure** | `LoopbackOnlyWebServerCustomizer` now forces the HTTP server to bind to `127.0.0.1`, including when a generic Spring `server.address` override is supplied. | The API remains unauthenticated, but the supported server configuration no longer exposes it on a network interface. | Keep the API loopback-only. If remote access becomes an explicit requirement, add access control before changing this binding behavior. |
+| **RESOLVED 2026-10-22: unbounded detached logs** | Detached stdout/stderr now passes through a synchronized writer capped at 10 MiB per container log. The writer records a truncation marker and discards additional output without breaking the workload's output pipe. | A noisy workload can no longer grow its detached log without bound. | Keep the cap documented and revisit it only if MiniDock's local workflow needs a different limit. |
+| **RESOLVED 2026-10-22: container list API parameter binding** | `ContainerController` now names its `all`, `offset`, and `limit` query parameters and `id` path parameters explicitly. A combined app smoke test found that `/api/v1/containers` returned HTTP 400 because Maven does not retain Java parameter names for Spring reflection by default. | Container list and parameterized container endpoints no longer depend on compiler `-parameters` metadata. | Keep web request parameter names explicit and add Java API tests when a Java test suite is introduced. |
+| **PARTIALLY RESOLVED 2026-10-22: forced-termination cleanup** | Daemon startup removes empty direct-child cgroups from the configured cgroup subtree and preserves populated groups. Durable ownership records for network interfaces, firewall rules, forwarding state, and temporary rootfs paths are not implemented, so those are not swept automatically. | Stale cgroups are recovered on restart; other host-global or temporary leftovers may remain after SIGKILL or host crash. | Add durable ownership metadata before attempting an automatic network or filesystem sweep; test forced termination and recovery on a disposable host. |
+| **P2: archive resource limits** | Multipart upload accepts up to 8 GB and rootfs extraction caps regular-file contents at 8 GiB, but extraction does not cap archive entry count or metadata-only entries. | Large uploads and archives with many directories/links can still consume disk, memory, and request-processing time. The risk is greater if the API is reachable by untrusted clients. | Keep upload limits intentionally modest for the learning workflow and add an entry-count bound; consider request/concurrency limits if local resource exhaustion becomes a problem. |
+| **P2: bridge name/subnet collision** | The network manager reuses an existing `minidock0`, replaces its address with `10.0.0.1/24`, and brings it up, even when it did not create that interface. | An unrelated interface using that reserved name or subnet can have its host networking changed. | Document `minidock0` and `10.0.0.0/24` as reserved for MiniDock and fail with a clear diagnostic when an existing bridge has unexpected configuration. Keep this behavior isolated to opted-in networking. |
+
+These findings are based on static source inspection plus the privileged `make e2e` run reported on 2026-10-22. That run confirms the exercised cgroup, namespace/rootfs, bridge/veth, and firewall setup/normal-cleanup path on the target host; it does not verify forced-termination recovery.
 
 Do not treat missing Docker features as work to implement. MiniDock's success criteria are a local workflow that stages a rootfs archive, starts a command with basic isolation and requested limits, lists and stops it, retrieves detached logs, and performs predictable cleanup and state recovery on the supported Linux host.
 
