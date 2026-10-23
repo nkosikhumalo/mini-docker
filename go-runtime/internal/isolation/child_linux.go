@@ -152,7 +152,9 @@ func (starter ChildStarter) StartPaused(ctx context.Context, config container.Co
 				return nil, fmt.Errorf("open container log: %w", openErr)
 			}
 			logFile = os.NewFile(uintptr(logFD), "minidock-container-log")
-			cmd.Stdout, cmd.Stderr = logFile, logFile
+			child.logFile = logFile
+			logWriter := &cappedLogWriter{file: logFile}
+			cmd.Stdout, cmd.Stderr = logWriter, logWriter
 		} else {
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
@@ -198,9 +200,6 @@ func (starter ChildStarter) StartPaused(ctx context.Context, config container.Co
 	for _, file := range inherited {
 		_ = file.Close()
 	}
-	if logFile != nil {
-		_ = logFile.Close()
-	}
 	if child.pty != nil && child.pty.slave != nil {
 		_ = child.pty.slave.Close()
 		child.pty.slave = nil
@@ -211,7 +210,6 @@ func (starter ChildStarter) StartPaused(ctx context.Context, config container.Co
 	child.ready = readyR
 	if err := child.verifyNamespaces(); err != nil {
 		_ = child.Close()
-		_ = cmd.Wait()
 		return nil, err
 	}
 	return child, nil
@@ -263,6 +261,7 @@ type Child struct {
 	stdin    io.WriteCloser
 	stdout   io.ReadCloser
 	stderr   io.ReadCloser
+	logFile  *os.File
 	pty      *PseudoTerminal
 	release  *os.File
 	ready    *os.File
@@ -305,7 +304,7 @@ func (c *Child) Wait() error {
 		return errors.New("namespaced child was already waited")
 	}
 	c.waited = true
-	return c.cmd.Wait()
+	return errors.Join(c.cmd.Wait(), c.closeLogFile())
 }
 
 func (c *Child) Close() error {
@@ -321,13 +320,28 @@ func (c *Child) Close() error {
 		_ = c.pty.Close()
 		c.pty = nil
 	}
-	if c.cmd.ProcessState != nil || c.cmd.Process == nil {
+	var result error
+	if c.cmd.ProcessState == nil && c.cmd.Process != nil && !c.waited {
+		err := c.cmd.Process.Kill()
+		if err != nil && !errors.Is(err, os.ErrProcessDone) {
+			result = errors.Join(result, err)
+		}
+		c.waited = true
+		waitErr := c.cmd.Wait()
+		var exitError *exec.ExitError
+		if waitErr != nil && !errors.As(waitErr, &exitError) {
+			result = errors.Join(result, waitErr)
+		}
+	}
+	return errors.Join(result, c.closeLogFile())
+}
+
+func (c *Child) closeLogFile() error {
+	if c.logFile == nil {
 		return nil
 	}
-	err := c.cmd.Process.Kill()
-	if errors.Is(err, os.ErrProcessDone) {
-		return nil
-	}
+	err := c.logFile.Close()
+	c.logFile = nil
 	return err
 }
 
