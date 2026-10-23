@@ -68,10 +68,35 @@ public class GoRuntimeGateway implements RuntimeGateway {
             started = RuntimeServiceGrpc.newBlockingStub(channel)
                     .withDeadlineAfter(30, TimeUnit.SECONDS).start(request);
         } catch (StatusRuntimeException error) {
+            cancelAndAwaitStart(config.id());
             throw new IllegalStateException("Go runtime failed to start container " + config.id() + ": "
                     + error.getStatus().getDescription(), error);
         }
         return execution(config.id(), started.getPid());
+    }
+
+    private void cancelAndAwaitStart(String id) {
+        var stub = RuntimeServiceGrpc.newBlockingStub(channel);
+        try {
+            stub.withDeadlineAfter(5, TimeUnit.SECONDS)
+                    .stop(StopRequest.newBuilder().setId(id).build());
+        } catch (StatusRuntimeException error) {
+            if (error.getStatus().getCode() != io.grpc.Status.Code.NOT_FOUND) {
+                log.warn("Could not send cancellation for failed start of container {}", id, error);
+            }
+        }
+
+        try {
+            // Wait has no deadline: ContainerService must not remove the
+            // extracted rootfs until Go has completed its setup rollback.
+            stub.wait(WaitRequest.newBuilder().setId(id).build());
+        } catch (StatusRuntimeException error) {
+            if (error.getStatus().getCode() != io.grpc.Status.Code.NOT_FOUND) {
+                throw new RuntimeGateway.StartCleanupException(id, error);
+            }
+            // NotFound means startup never registered a session, or its
+            // failed-start cleanup already removed it.
+        }
     }
 
     @Override
