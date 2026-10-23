@@ -254,7 +254,9 @@ func (m *BridgeManager) enableNAT(ctx context.Context) error {
 		check := append([]string{}, rule.args...)
 		check = append([]string{"-t", tableName(rule.table), "-C", rule.chain}, check...)
 		if m.runner.Run(ctx, "iptables", check...) == nil {
-			added = append(added, rule)
+			// This rule predates this manager (or is shared with another
+			// manager). It provides the required behavior, but MiniDock must
+			// not claim ownership and remove it during cleanup.
 			continue
 		}
 		add := append([]string{}, rule.args...)
