@@ -35,19 +35,19 @@ public class ContainerController {
     }
 
     @GetMapping
-    public List<ContainerView> list(@RequestParam(defaultValue = "false") boolean all) {
+    public List<ContainerView> list(@RequestParam(name = "all", defaultValue = "false") boolean all) {
         return all ? containers.list() : containers.listActive();
     }
 
     @GetMapping("/{id}")
-    public ContainerView get(@PathVariable String id) {
+    public ContainerView get(@PathVariable("id") String id) {
         return containers.get(id);
     }
 
     @GetMapping(value = "/{id}/logs", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
-    public ResponseEntity<byte[]> logs(@PathVariable String id,
-                                       @RequestParam(defaultValue = "0") long offset,
-                                       @RequestParam(defaultValue = "1048576") long limit) {
+    public ResponseEntity<byte[]> logs(@PathVariable("id") String id,
+                                       @RequestParam(name = "offset", defaultValue = "0") long offset,
+                                       @RequestParam(name = "limit", defaultValue = "1048576") long limit) {
         var chunk = containers.logs(id, offset, limit);
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_OCTET_STREAM)
@@ -57,7 +57,7 @@ public class ContainerController {
     }
 
     @DeleteMapping("/{id}")
-    public ContainerView stop(@PathVariable String id) {
+    public ContainerView stop(@PathVariable("id") String id) {
         return containers.stop(id);
     }
 
