@@ -9,6 +9,12 @@ public interface RuntimeGateway {
     LogChunk logs(String id, long offset, long limit);
     Execution recover(String id, int pid);
 
+    final class StartCleanupException extends IllegalStateException {
+        public StartCleanupException(String id, Throwable cause) {
+            super("could not confirm cleanup after start failed for container " + id, cause);
+        }
+    }
+
     record RunConfig(String id, String rootfs, List<String> command, List<String> environment,
                      String hostname, long memoryMax, long cpuQuota, long cpuPeriod, boolean network,
                      String networkIp, boolean attach, boolean tty, String logPath) {}
