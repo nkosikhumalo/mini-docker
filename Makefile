@@ -2,8 +2,9 @@ SHELL := /bin/bash
 GO_CACHE ?= /tmp/minidock-go-cache
 INTEGRATION_GO_CACHE ?= /tmp/minidock-root-go-cache
 SUDO ?= sudo
+GO_BIN ?= $(shell command -v go || { test ! -x /usr/local/go/bin/go || echo /usr/local/go/bin/go; })
 
-.PHONY: build build-go build-java test test-go test-java test-integration run-go run-java clean
+.PHONY: build build-go build-java test test-go test-java test-integration e2e run-go run-java clean
 
 build: build-go build-java
 
@@ -27,6 +28,10 @@ test-java:
 test-integration:
 	$(SUDO) ./scripts/verify-host.sh
 	cd go-runtime && $(SUDO) -E env GOCACHE=$(INTEGRATION_GO_CACHE) go test -count=1 -v ./...
+
+# Real namespaces, mounts, cgroups, veth, and firewall setup on a disposable host.
+e2e:
+	$(SUDO) -E env MINIDOCK_GO_BIN=$(GO_BIN) ./scripts/run-e2e.sh
 
 run-go: build-go
 	./bin/minidockd
