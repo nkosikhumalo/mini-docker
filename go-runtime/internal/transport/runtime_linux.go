@@ -111,9 +111,12 @@ func (s *runtimeServer) Run(ctx context.Context, request *runtimev1.RunRequest) 
 	return responseForError(ctx, err)
 }
 
-func (s *runtimeServer) Start(_ context.Context, request *runtimev1.RunRequest) (*runtimev1.StartResponse, error) {
+func (s *runtimeServer) Start(rpcCtx context.Context, request *runtimev1.RunRequest) (*runtimev1.StartResponse, error) {
 	if s.managed == nil {
 		return nil, status.Error(codes.Unimplemented, "managed Start is unavailable")
+	}
+	if err := rpcCtx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
 	}
 	config := configFromRequest(request)
 	if err := config.Validate(); err != nil {
@@ -175,7 +178,16 @@ func (s *runtimeServer) Start(_ context.Context, request *runtimev1.RunRequest) 
 			time.AfterFunc(10*time.Minute, func() { s.removeSessionIfUnwaited(item) })
 		}
 	}()
-	<-item.started
+	select {
+	case <-item.started:
+	case <-rpcCtx.Done():
+		// The RPC context only controls startup. Once Start acknowledges the
+		// process, the session remains alive until Stop or daemon shutdown.
+		item.cancel()
+		<-item.done
+		s.removeSession(item)
+		return nil, status.FromContextError(rpcCtx.Err()).Err()
+	}
 	if item.pid <= 0 {
 		s.mu.Lock()
 		delete(s.sessions, config.ID)
