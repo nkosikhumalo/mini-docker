@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Limits struct {
@@ -68,6 +69,54 @@ func CreateGroup(root, id string) (string, func() error, error) {
 		return nil
 	}
 	return group, cleanup, nil
+}
+
+// RemoveEmptyGroups removes only direct child cgroups that contain no
+// processes. It is intended for startup recovery after a forced daemon exit:
+// populated groups may still belong to running containers and are left alone.
+func RemoveEmptyGroups(root string) error {
+	if !filepath.IsAbs(root) || filepath.Clean(root) == "/" {
+		return errors.New("cgroup recovery root must be an absolute dedicated subtree")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("resolve cgroup recovery root: %w", err)
+	}
+	if filepath.Clean(resolvedRoot) == "/sys/fs/cgroup" {
+		return errors.New("cgroup recovery root must not be the cgroup hierarchy root")
+	}
+	entries, err := os.ReadDir(resolvedRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read cgroup recovery root: %w", err)
+	}
+	var result error
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		group := filepath.Join(root, entry.Name())
+		procs, readErr := os.ReadFile(filepath.Join(group, "cgroup.procs"))
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue // Not a cgroup directory.
+		}
+		if readErr != nil {
+			result = errors.Join(result, fmt.Errorf("inspect cgroup %q: %w", entry.Name(), readErr))
+			continue
+		}
+		if len(strings.TrimSpace(string(procs))) != 0 {
+			continue
+		}
+		if removeErr := os.Remove(group); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			result = errors.Join(result, fmt.Errorf("remove empty cgroup %q: %w", entry.Name(), removeErr))
+		}
+	}
+	return result
 }
 
 // WriteLimits writes into an existing cgroup v2 control directory. It is also
