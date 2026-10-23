@@ -116,10 +116,12 @@ public class ContainerService {
         } catch (IOException | RuntimeException failure) {
             record.preparationFailed(failure);
             ipAllocator.release(id);
-            try {
-                RootfsExtractor.deleteTree(containerDirectory);
-            } catch (IOException cleanupError) {
-                failure.addSuppressed(cleanupError);
+            if (!(failure instanceof RuntimeGateway.StartCleanupException)) {
+                try {
+                    RootfsExtractor.deleteTree(containerDirectory);
+                } catch (IOException cleanupError) {
+                    failure.addSuppressed(cleanupError);
+                }
             }
             throw failure;
         }
