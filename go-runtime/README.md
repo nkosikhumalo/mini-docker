@@ -12,7 +12,8 @@ request, prepares namespaces/cgroups/network/rootfs, and returns the host PID
 once child setup is acknowledged. `Wait` returns the process exit code and
 `Stop` cancels it. `ListActiveContainers` reports live daemon sessions for Java
 startup reconciliation; `GetContainerLogs` returns a bounded range from the
-container's `container.log`. Detached stdout/stderr goes to this file. Set
+container's `container.log`. Detached stdout/stderr goes to this file, capped
+at 10 MiB per container with a truncation marker. Set
 `MINIDOCK_CONTAINERS_DIR` in both Java and Go when their home directories differ.
 On daemon shutdown, active child processes are canceled and waited for before
 the socket server exits.
