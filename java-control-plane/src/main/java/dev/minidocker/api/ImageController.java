@@ -42,7 +42,7 @@ public class ImageController {
                 Files.copy(input, temporary, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             }
             Path staged = images.registerArchive(name, temporary);
-            return ResponseEntity.ok(Map.of("name", name, "archive", staged.getFileName().toString()));
+            return ResponseEntity.ok(Map.of("name", name, "archive", staged.getFileName().toString(), "path", staged.toString()));
         } finally {
             Files.deleteIfExists(temporary);
         }
