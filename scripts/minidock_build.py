@@ -49,7 +49,7 @@ def reject_symlinks(directory):
             fail(f"built output contains a symlink, which this small image builder does not package: {path.relative_to(directory)}")
 
 
-def build_vite(project, archive, repo):
+def build_vite(project, archive, repo, package_existing_dist=False):
     package_file = project / "package.json"
     if not package_file.is_file():
         fail(f"{project} is not a supported source project (package.json was not found)")
@@ -61,16 +61,20 @@ def build_vite(project, archive, repo):
     if "vite" not in dependencies or not package.get("scripts", {}).get("build"):
         fail("source builds currently support Vite projects with a package.json build script")
 
-    node_version()
-    npm = shutil.which("npm")
-    if npm is None:
-        fail("npm was not found on PATH")
-    if not (project / "node_modules").is_dir():
-        if (project / "package-lock.json").is_file():
-            run([npm, "ci"], project)
-        else:
-            run([npm, "install"], project)
-    run([npm, "run", "build"], project)
+    if not package_existing_dist:
+        node_version()
+        npm = shutil.which("npm")
+        if npm is None:
+            fail("npm was not found on PATH")
+        build_env = os.environ.copy()
+        build_env.pop("OPENROUTER_API_KEY", None)
+        build_env.pop("OPENROUTER_MODEL", None)
+        if not (project / "node_modules").is_dir():
+            if (project / "package-lock.json").is_file():
+                run([npm, "ci"], project, build_env)
+            else:
+                run([npm, "install"], project, build_env)
+        run([npm, "run", "build"], project, build_env)
 
     dist = project / "dist"
     if not dist.is_dir() or not (dist / "index.html").is_file():
@@ -100,8 +104,9 @@ def build_vite(project, archive, repo):
 
 
 def main():
-    if len(sys.argv) != 3:
-        fail("usage: minidock_build.py PROJECT_DIR OUTPUT.tar.gz")
+    package_existing_dist = len(sys.argv) == 4 and sys.argv[3] == "--from-dist"
+    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and not package_existing_dist):
+        fail("usage: minidock_build.py PROJECT_DIR OUTPUT.tar.gz [--from-dist]")
     project = Path(sys.argv[1]).expanduser().resolve()
     archive = Path(sys.argv[2]).expanduser().resolve()
     repo = Path(__file__).resolve().parent.parent
@@ -109,7 +114,7 @@ def main():
         fail(f"project directory does not exist: {project}")
     if not archive.parent.is_dir():
         fail(f"output directory does not exist: {archive.parent}")
-    build_vite(project, archive, repo)
+    build_vite(project, archive, repo, package_existing_dist)
     print(f"MiniDock Vite image archive created: {archive}")
 
 
