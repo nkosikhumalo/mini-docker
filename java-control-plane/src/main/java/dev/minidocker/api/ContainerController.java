@@ -3,6 +3,8 @@ package dev.minidocker.api;
 import dev.minidocker.service.ContainerNotFoundException;
 import dev.minidocker.service.ContainerService;
 import dev.minidocker.image.ImageNotFoundException;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -84,5 +86,13 @@ public class ContainerController {
     @ExceptionHandler(IOException.class)
     public ResponseEntity<Map<String, String>> invalidImage(IOException error) {
         return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(Map.of("error", error.getMessage()));
+    }
+
+    @ExceptionHandler(StatusRuntimeException.class)
+    public ResponseEntity<Map<String, String>> runtimeFailure(StatusRuntimeException error) {
+        HttpStatus status = error.getStatus().getCode() == Status.Code.NOT_FOUND
+                ? HttpStatus.NOT_FOUND : HttpStatus.BAD_GATEWAY;
+        String message = error.getStatus().getDescription();
+        return ResponseEntity.status(status).body(Map.of("error", message == null ? "runtime request failed" : message));
     }
 }
