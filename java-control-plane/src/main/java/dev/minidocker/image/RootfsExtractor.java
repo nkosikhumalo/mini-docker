@@ -41,6 +41,13 @@ public class RootfsExtractor {
             TarArchiveEntry entry;
             while ((entry = tar.getNextTarEntry()) != null) {
                 Path output = resolveEntry(root, entry.getName());
+                if (output.equals(root)) {
+                    if (!entry.isDirectory()) {
+                        throw new IOException("rootfs archive root entry must be a directory");
+                    }
+                    directories.put(root, entry.getMode());
+                    continue;
+                }
                 ensureSafeParents(root, output.getParent());
                 if (entry.isDirectory()) {
                     ensureDirectory(root, output);
