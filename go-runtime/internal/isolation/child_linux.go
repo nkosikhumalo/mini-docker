@@ -186,6 +186,7 @@ func (starter ChildStarter) StartPaused(ctx context.Context, config container.Co
 		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: hostUID, Size: 1}},
 		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: hostGID, Size: 1}},
 		GidMappingsEnableSetgroups: false,
+		Credential:                 &syscall.Credential{Uid: 0, Gid: 0, NoSetGroups: true},
 	}
 	if config.TTY {
 		cmd.SysProcAttr.Setsid, cmd.SysProcAttr.Setctty, cmd.SysProcAttr.Ctty = true, true, 0
