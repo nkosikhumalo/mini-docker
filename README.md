@@ -52,21 +52,26 @@ MiniDock's small static web server. Node.js 20.19+ or 22.12+ and Go must be on
 Project build scripts execute on the host with your user permissions. Other
 project types still need to be assembled as a rootfs archive.
 
-To build and run the included frontend with the MiniDock daemon and Java API,
-use the root `run.sh` script:
+Start the MiniDock services with the root `run.sh` script:
 
 ```sh
 ./run.sh
 ```
 
-It builds the services, starts the Go daemon with network privileges and the
-Java API, stages `frontend/`, launches the web container, and forwards the
-container's port 8080 to `http://127.0.0.1:4173`. It prompts for sudo when
-needed and cleans up the processes and container when you press Ctrl+C. Change
-the browser port with `MINIDOCK_WEB_PORT=9000 ./run.sh`; the API port defaults
-to 8080 and can be changed with `MINIDOCK_API_PORT`. The frontend's own backend
-URL still comes from its Vite configuration (`VITE_API_BASE_URL` or the
-frontend `.env` file); MiniDock's Java API is only the container control plane.
+It builds MiniDock, starts the Go daemon and Java API, and keeps them running
+until you press Ctrl+C. In another terminal, build and stage the frontend image
+when you're ready:
+
+```sh
+bin/minidock build -t frontend-app frontend/
+```
+
+That command builds the image but does not start a container. Its static web
+server listens on container port 8080 when you later choose to run it. Change
+the Java API port with `MINIDOCK_API_PORT` when starting `run.sh`. The
+frontend's own backend URL comes from its Vite configuration
+(`VITE_API_BASE_URL` or `frontend/.env`); MiniDock's Java API is only the
+image/container control plane.
 
 To stage any prepared rootfs archive, for example:
 
@@ -78,9 +83,8 @@ bin/minidock build -t frontend frontend-rootfs.tar.gz
 The archive may include the conventional `.` root-directory entry. Start the
 Vite image with the `minidock-web` command shown above. Its server listens on
 port 8080 inside the container. With bridge networking configured, `run`
-returns a container IP; try `http://CONTAINER_IP:8080` from the host. The
-`run.sh` convenience runner also forwards that service to a configurable
-localhost port. Host firewall policy can still block direct bridge access.
+returns a container IP; try `http://CONTAINER_IP:8080` from the host. Host
+firewall policy can still block direct bridge access.
 
 For other images, `run` uses the startup executable supplied in the command
 and returns after Go confirms startup and reports the container ID and host
@@ -89,9 +93,8 @@ container PTY, including terminal resize and exit-code forwarding. Java exposes 
 `/api/v1/images` and `/api/v1/containers`.
 
 For a web frontend, the rootfs also needs a web server and the app must listen
-on a container interface. MiniDock's general `run` command still has no `-p`
-host-port publishing option; `run.sh` supplies a temporary localhost forwarder
-for this included frontend only. A static bundle alone is not a running web app.
+on a container interface. MiniDock's `run` command still has no `-p` host-port
+publishing option. A static bundle alone is not a running web app.
 
 `minidock ask "run a small shell with 64 MB of memory"` asks OpenRouter to
 translate a request into a MiniDock run configuration. It only offers images
