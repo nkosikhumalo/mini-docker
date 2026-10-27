@@ -58,10 +58,11 @@ case "$command_name" in
     fi
     curl --fail-with-body -sS -F "name=$name" -F "archive=@$archive" "$api/api/v1/images"
     if [[ -n $temporary_archive ]]; then
+      container_port=${MINIDOCK_CONTAINER_PORT:-8080}
       cat <<EOF
 
 Start this static frontend with:
-  bin/minidock run -d $name /usr/bin/minidock-web --root /usr/share/minidock/www --listen 0.0.0.0:8080
+  bin/minidock run -d $name /usr/bin/minidock-web --root /usr/share/minidock/www --listen 0.0.0.0:$container_port
 EOF
     fi
     ;;
