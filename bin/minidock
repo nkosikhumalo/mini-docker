@@ -23,9 +23,10 @@ api=${api%/}
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  minidock build -t NAME PROJECT_DIR|IMAGE.tar[.gz]
+  minidock build [--from-dist] -t NAME PROJECT_DIR|IMAGE.tar[.gz]
   minidock images
   minidock ask "describe the container you want"
+  minidock ask-build -t NAME PROJECT_DIR "describe the image to build"
   minidock run [-m MEMORY] [-c CPU] [-d|--detach] [--network|--no-network] IMAGE COMMAND [ARG...]
   minidock ps
   minidock stop CONTAINER_ID
@@ -43,6 +44,11 @@ shift
 
 case "$command_name" in
   build)
+    build_mode=build
+    if [[ ${1:-} == --from-dist ]]; then
+      build_mode=from-dist
+      shift
+    fi
     [[ ${1:-} == -t && $# -eq 3 ]] || usage
     name=$2
     input=$3
@@ -50,7 +56,11 @@ case "$command_name" in
     if [[ -d $input ]]; then
       temporary_archive=$(mktemp --suffix=.tar.gz "${TMPDIR:-/tmp}/minidock-image.XXXXXX")
       trap 'rm -f -- "$temporary_archive"' EXIT
-      python3 "$repo/scripts/minidock_build.py" "$input" "$temporary_archive"
+      if [[ $build_mode == from-dist ]]; then
+        python3 "$repo/scripts/minidock_build.py" "$input" "$temporary_archive" --from-dist
+      else
+        python3 "$repo/scripts/minidock_build.py" "$input" "$temporary_archive"
+      fi
       archive=$temporary_archive
     else
       [[ -f $input ]] || { echo "project directory or image archive not found: $input" >&2; exit 1; }
@@ -91,6 +101,38 @@ EOF
       exit 1
     fi
     printf '%s' "$response"
+    ;;
+  ask-build)
+    [[ ${1:-} == -t && $# -ge 4 ]] || usage
+    image_name=$2
+    project_dir=$3
+    shift 3
+    prompt=$*
+    plan=$(python3 "$repo/scripts/minidock_ask_build.py" "$project_dir" "$image_name" "$prompt") || exit $?
+    selection_file=$(mktemp "${TMPDIR:-/tmp}/minidock-build-choice.XXXXXX")
+    plan_file=$(mktemp "${TMPDIR:-/tmp}/minidock-build-plan.XXXXXX")
+    trap 'rm -f -- "$selection_file" "$plan_file"' EXIT
+    printf '%s\n' "$plan" > "$plan_file"
+    printf 'AI image build recommendations (no files or image changed yet):\n'
+    python3 "$repo/scripts/minidock_select_build.py" "$plan_file" "$selection_file"
+    selected_option=$(cat "$selection_file")
+    [[ -n $selected_option ]] || { echo 'Cancelled; no build was started and no image was changed.'; exit 0; }
+    option_details=$(python3 -c 'import json,sys; p=json.load(sys.stdin); o=next(x for x in p["options"] if x["id"]==sys.argv[1]); print(json.dumps(o,indent=2))' "$selected_option" <<<"$plan")
+    printf '\nSelected local recipe:\n%s\n\n' "$option_details"
+    cat <<'EOF'
+MiniDock maps this choice to fixed adapter code. It does not run model-generated commands.
+The build recipe may run the project's npm build script on this host with your user permissions.
+EOF
+    read -r -p 'Build and stage this image? [y/N] ' answer
+    [[ $answer == y || $answer == Y || $answer == yes || $answer == YES ]] || {
+      echo 'Cancelled; no build was started and no image was changed.'
+      exit 0
+    }
+    case "$selected_option" in
+      build) "$repo/bin/minidock" build -t "$image_name" "$project_dir" ;;
+      package-existing-dist) "$repo/bin/minidock" build --from-dist -t "$image_name" "$project_dir" ;;
+      *) echo 'minidock ask-build: selected recipe is not supported' >&2; exit 1 ;;
+    esac
     ;;
   run)
     memory=
