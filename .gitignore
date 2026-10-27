@@ -5,3 +5,6 @@
 # Maven output and the project-local Maven distribution downloaded by mvnw
 /java-control-plane/target/
 /java-control-plane/.mvn/wrapper/apache-maven-*
+
+# Local API credentials and environment overrides
+/.env
