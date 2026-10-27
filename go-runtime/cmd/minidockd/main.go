@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -95,6 +96,15 @@ func main() {
 	defer os.Remove(socket)
 	if err := os.Chmod(socket, 0660); err != nil {
 		log.Fatalf("restrict runtime socket permissions: %v", err)
+	}
+	if group := os.Getenv("MINIDOCK_SOCKET_GID"); group != "" {
+		gid, parseErr := strconv.Atoi(group)
+		if parseErr != nil || gid < 0 {
+			log.Fatalf("invalid MINIDOCK_SOCKET_GID %q", group)
+		}
+		if err := os.Chown(socket, -1, gid); err != nil {
+			log.Fatalf("set runtime socket group: %v", err)
+		}
 	}
 
 	server := grpc.NewServer()
