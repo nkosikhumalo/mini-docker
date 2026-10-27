@@ -35,6 +35,7 @@ defaults to `/tmp/minidock-runtime.sock` and has mode `0660`. Override it with
 ```sh
 bin/minidock build -t alpine-base alpine-minirootfs.tar.gz
 bin/minidock build -t foxvue frontend/
+bin/minidock ask-build -t foxvue frontend/ "Build this frontend as a static website"
 bin/minidock images
 bin/minidock run -it -m 256M -c 50 alpine-base /bin/sh
 bin/minidock run -d foxvue /usr/bin/minidock-web --root /usr/share/minidock/www --listen 0.0.0.0:8080
@@ -105,6 +106,19 @@ text; `command` is passed as an argument array. `ask` starts confirmed
 containers detached and prints the normal container response.
 The request text is sent to OpenRouter; do not include secrets or private
 environment values in an `ask` prompt.
+
+`bin/minidock ask-build -t NAME PROJECT_DIR "what you want to build"` sends
+OpenRouter a small project profile based on `package.json` (project name,
+dependency names, lockfiles, and whether a production `dist/index.html` exists).
+It does not send source files or `.env` values. The AI explains what it found
+and ranks available choices. Use the up/down arrows and Enter to choose, then
+review and confirm the selected recipe. The current Vite choices are to run the
+project build script and package its output, or, when `dist/` already exists,
+package that output without running npm scripts. MiniDock maps each choice to
+fixed local adapter code; model output never becomes a shell command. Confirmed
+build scripts run on the host with your user permissions. Only a successfully
+built and uploaded archive replaces an image with the same name. The staging
+response includes the stored archive path so you can find the image afterwards.
 
 The CLI loads `OPENROUTER_API_KEY` and optional `OPENROUTER_MODEL` from the
 root-level `.env` file without overriding shell-exported values. The file is
