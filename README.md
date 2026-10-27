@@ -34,19 +34,81 @@ defaults to `/tmp/minidock-runtime.sock` and has mode `0660`. Override it with
 
 ```sh
 bin/minidock build -t alpine-base alpine-minirootfs.tar.gz
+bin/minidock build -t foxvue frontend/
 bin/minidock images
 bin/minidock run -it -m 256M -c 50 alpine-base /bin/sh
+bin/minidock run -d foxvue /usr/bin/minidock-web --root /usr/share/minidock/www --listen 0.0.0.0:8080
 bin/minidock run -d --no-network alpine-base /bin/sh -c 'echo hello'
 bin/minidock ps
 bin/minidock stop CONTAINER_ID
 bin/minidock logs CONTAINER_ID
 ```
 
-`build` stages an existing `.tar` or `.tar.gz` rootfs archive; it does not
-build a Dockerfile. `run` returns after Go confirms startup and reports the
-container ID and host PID. Attached runs connect the caller's terminal to a
+`build` accepts an existing `.tar` or `.tar.gz` Linux root-filesystem archive,
+or a supported Vite project directory. For Vite projects it runs the project's
+`npm run build` on the host and packages the generated `dist/` assets with
+MiniDock's small static web server. Node.js 20.19+ or 22.12+ and Go must be on
+`PATH`; when `node_modules/` is absent, it installs dependencies with npm.
+Project build scripts execute on the host with your user permissions. Other
+project types still need to be assembled as a rootfs archive.
+
+To build and run the included frontend with the MiniDock daemon and Java API,
+use the root `run.sh` script:
+
+```sh
+./run.sh
+```
+
+It builds the services, starts the Go daemon with network privileges and the
+Java API, stages `frontend/`, launches the web container, and forwards the
+container's port 8080 to `http://127.0.0.1:4173`. It prompts for sudo when
+needed and cleans up the processes and container when you press Ctrl+C. Change
+the browser port with `MINIDOCK_WEB_PORT=9000 ./run.sh`; the API port defaults
+to 8080 and can be changed with `MINIDOCK_API_PORT`. The frontend's own backend
+URL still comes from its Vite configuration (`VITE_API_BASE_URL` or the
+frontend `.env` file); MiniDock's Java API is only the container control plane.
+
+To stage any prepared rootfs archive, for example:
+
+```sh
+tar -C rootfs -czf frontend-rootfs.tar.gz .
+bin/minidock build -t frontend frontend-rootfs.tar.gz
+```
+
+The archive may include the conventional `.` root-directory entry. Start the
+Vite image with the `minidock-web` command shown above. Its server listens on
+port 8080 inside the container. With bridge networking configured, `run`
+returns a container IP; try `http://CONTAINER_IP:8080` from the host. The
+`run.sh` convenience runner also forwards that service to a configurable
+localhost port. Host firewall policy can still block direct bridge access.
+
+For other images, `run` uses the startup executable supplied in the command
+and returns after Go confirms startup and reports the container ID and host
+PID. Attached runs connect the caller's terminal to a
 container PTY, including terminal resize and exit-code forwarding. Java exposes the same operations through
 `/api/v1/images` and `/api/v1/containers`.
+
+For a web frontend, the rootfs also needs a web server and the app must listen
+on a container interface. MiniDock's general `run` command still has no `-p`
+host-port publishing option; `run.sh` supplies a temporary localhost forwarder
+for this included frontend only. A static bundle alone is not a running web app.
+
+`minidock ask "run a small shell with 64 MB of memory"` asks OpenRouter to
+translate a request into a MiniDock run configuration. It only offers images
+already staged locally, validates the returned fields, displays the plan, and
+requires confirmation before sending it through the same Java API as `run`.
+The AI request does not pull images or run arbitrary model-generated shell
+text; `command` is passed as an argument array. `ask` starts confirmed
+containers detached and prints the normal container response.
+The request text is sent to OpenRouter; do not include secrets or private
+environment values in an `ask` prompt.
+
+The CLI loads `OPENROUTER_API_KEY` and optional `OPENROUTER_MODEL` from the
+root-level `.env` file without overriding shell-exported values. The file is
+ignored by Git and has restrictive local permissions. Paste your key after
+`OPENROUTER_API_KEY=`. The default model is OpenRouter Auto (`openrouter/auto`);
+you can select another model in `.env`. Auto routes to a model at that model's
+price, so check your OpenRouter account's model and spending settings.
 
 ## Storage and host requirements
 
