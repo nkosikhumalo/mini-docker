@@ -15,7 +15,7 @@ The Java API is bound to `127.0.0.1:8080`. Java and Go communicate over a Unix d
 
 | Path | Responsibility |
 | --- | --- |
-| `bin/minidock` | Bash CLI for image and container HTTP endpoints, including attach and log retrieval. |
+| `bin/minidock` | Bash CLI for image/container HTTP endpoints and `ask` prompt-to-container requests. |
 | `Makefile` | Build, test, run, and privileged host integration targets. |
 | `protocol/runtime.proto` | Shared Java-Go RPC and message contract. |
 | `go-runtime/cmd/minidockd` | Daemon startup, socket setup, runtime service wiring, shutdown. |
@@ -34,6 +34,11 @@ The Java API is bound to `127.0.0.1:8080`. Java and Go communicate over a Unix d
 | `.../state` | Container records, JSON persistence, lifecycle state, IP allocator. |
 | `java-control-plane/src/main/resources/application.properties` | Runtime socket and data directory defaults/environment overrides. |
 | `scripts/verify-host.sh` | Preflight checks for privileged Linux integration runs. |
+| `scripts/minidock_ask.py` | OpenRouter request, JSON parsing, and validation of generated run specs. |
+| `scripts/minidock_build.py` | Builds supported Vite source directories into small static-site rootfs archives. |
+| `go-runtime/cmd/minidock-web` | Small Go static-file server included in Vite-built images. |
+| `run.sh` | Builds and supervises the MiniDock services and included frontend, with localhost port forwarding. |
+| `scripts/tcp_forward.py` | Small localhost-only TCP forwarder used by `run.sh` for the frontend container. |
 
 ## 3. What has been implemented in the recent work
 
@@ -43,6 +48,12 @@ These are the concrete additions that a new maintainer may otherwise mistake for
 - Added daemon `ListActiveContainers` support and Java startup reconciliation. Java now restores leases, reconnects `Wait` monitoring for sessions still owned by Go, marks stale saved records no longer active, and adds records for live Go sessions absent from Java's snapshot.
 - Added `log_path` to the runtime RPC contract. Detached Go processes write stdout and stderr to the per-container `container.log`; each log is now capped at 10 MiB with a truncation marker, Go serves bounded log reads, Java proxies them over HTTP, and the CLI has a `logs` command.
 - Added baseline child hardening: `no_new_privs`, `nosuid`/`nodev` root mount flags, read-only restrictive `/proc`, and a private minimal `/dev` plus `devpts` setup.
+- Added `minidock ask`: the CLI sends a prompt and staged image list to OpenRouter, validates the returned MiniDock run spec, shows it for confirmation, then submits confirmed runs through the existing Java API. `OPENROUTER_API_KEY` and optional `OPENROUTER_MODEL` load from the ignored root `.env` file; the default model is `openrouter/auto`.
+- Added offline tests for OpenRouter JSON/config validation and the CLI-to-container API payload. A mocked-provider live app smoke run staged a temporary static BusyBox rootfs, confirmed a proposal, ran it through the real namespace/runtime path with networking disabled, and retrieved the expected output from logs.
+- Rootfs extraction accepts the conventional tar root directory entry (`.`/`./`) while continuing to reject non-directory entries that resolve to the root. Verified by building a `tar -C rootfs .` BusyBox image and running it through the real Java/Go path.
+- `bin/minidock build -t NAME PROJECT_DIR` now supports the frontend project in `frontend/`: it runs its npm build on the host, then packages only `dist/` plus a small Go static server into a Linux rootfs archive and stages it through the existing Java image API. This is a small Vite adapter, not a general Dockerfile or arbitrary project builder. It requires a supported Node.js version, npm, Go, and Java API access; npm scripts run with the caller's host-user permissions. The app is started with `/usr/bin/minidock-web` on port 8080.
+- Added root `run.sh` to build the project, start the Go daemon with the caller's primary group on its Unix socket, start the Java API, build/stage `frontend/`, and run the static web container. `scripts/tcp_forward.py` forwards container port 8080 to `127.0.0.1:4173` by default; set `MINIDOCK_WEB_PORT` to change the browser port and `MINIDOCK_API_PORT` to change Java's port. Ctrl+C stops the container and services started by the script. It needs sudo for bridge networking and supported Node/npm/Go/Java tools. The frontend's own API URL comes from Vite configuration; MiniDock's Java control plane is not the frontend application's backend.
+- Built the frontend successfully with Node.js 22.22.3 after the host Node.js 18.19.1 was rejected by Vite 8's engine requirement. The generated static server passed homepage, SPA route, JavaScript asset, and missing-asset checks outside a container. Java packaging also succeeded when Maven used the writable `/tmp/minidock-maven-cache`. A complete CLI-to-Java-to-Go build/run/log/stop smoke result is not yet confirmed.
 - Added/updated Go integration and transport checks, the host preflight script, Makefile targets, and handover-oriented READMEs.
 
 When modifying these features, remember the ownership boundary: Java owns the durable registry and image files; Go owns live process sessions and kernel setup. The protobuf file is the cross-language API. A feature is only fully integrated after both clients/servers and generated bindings agree.
@@ -51,7 +62,7 @@ When modifying these features, remember the ownership boundary: Java owns the du
 
 ### Image staging
 
-`bin/minidock build -t NAME ARCHIVE` stages an existing `.tar` or `.tar.gz` rootfs archive in Java's image directory. This is the intentionally simple image workflow for MiniDock. Dockerfile builds, remote registries, and Docker-compatible image formats are not needed for the current project purpose.
+`bin/minidock build -t NAME ARCHIVE` stages an existing `.tar` or `.tar.gz` rootfs archive in Java's image directory. `bin/minidock build -t NAME PROJECT_DIR` also supports Vite frontend source directories by running the host npm build and packaging static output with MiniDock's web server. Other project types still need a prepared Linux rootfs archive. This is the intentionally simple image workflow for MiniDock. Dockerfile builds, remote registries, and Docker-compatible image formats are not needed for the current project purpose.
 
 ### Container creation
 
@@ -136,6 +147,7 @@ Run it on a disposable Linux host with sudo available and `MINIDOCK_CGROUP_ROOT`
 | Setting | Default | Used by |
 | --- | --- | --- |
 | `MINIDOCK_SOCKET` | `/tmp/minidock-runtime.sock` | Java client and Go daemon; must match. |
+| `MINIDOCK_SOCKET_GID` | Unchanged socket group | Optional Go-daemon group owner for the `0660` runtime socket; `run.sh` sets it so Java can connect when only the daemon runs with sudo. |
 | `MINIDOCK_IMAGES_DIR` | `${user.home}/.local/share/minidock/images` | Java image archives. |
 | `MINIDOCK_CONTAINERS_DIR` | `${user.home}/.local/share/minidock/containers` | Java rootfs/log storage and Go detached logs. Set identically if Java and Go have different home directories. |
 | `MINIDOCK_STATE_FILE` | `${user.home}/.local/share/minidock/state.json` | Java lifecycle snapshots; the sibling `.lock` file enforces one control-plane writer. |
@@ -160,9 +172,12 @@ The latest implementation pass completed these checks:
 - `make test` passed the Go test suite and `go vet`; its first Maven invocation could not write to the default read-only `~/.m2`, then `./mvnw -Dmaven.repo.local=/tmp/minidock-maven-cache test` compiled Java successfully. Maven found no Java test sources.
 - `make build-go` built both Go binaries.
 - A combined local smoke run started `minidockd` and the Spring Boot control plane, confirmed Java connected to Go over gRPC, and received `200` from both image and container list APIs.
+- `make test-ask` passed offline AI schema/config checks and CLI submission/missing-key checks. A mocked OpenRouter completion also drove a confirmed request through the real local Java API and Go daemon; the temporary BusyBox workload ran isolated, exited, and returned its expected log output.
 - Shell syntax checks, `git diff --check`, and `make -n test-integration` successfully.
 
 The real-host `make e2e` test subsequently passed on the target Zorin OS host on 2026-10-22, exercising the namespace/rootfs, cgroup, bridge/veth, and firewall setup/normal-cleanup path. This is one successful host run, not broad distro compatibility coverage; forced-termination behavior is not covered.
+
+The AI workflow test used a mocked provider response. No live OpenRouter request was made because the local `.env` key is blank; the production provider call and the user's actual OpenRouter model/account settings remain unverified.
 
 ### Must resolve or verify before relying on end-to-end operation
 
@@ -182,6 +197,7 @@ The real-host `make e2e` test subsequently passed on the target Zorin OS host on
 - The system needs failure-injection and concurrent lifecycle tests: Java restart while Go stays up, Go restart during start, stop/start races, corrupt state file, extraction failures, log growth, and partial bridge setup.
 - Network forwarding/firewall setup is host-global and needs careful review and cleanup testing.
 - The API is designed for local use and is forced to bind to loopback. It has no authentication or authorization; remote multi-user access would require adding access control and deliberately changing the binding guard.
+- Source build support currently covers Vite static frontends only; it runs the npm build script on the host and does not support arbitrary pre-build commands or Dockerfiles. General host-port publishing is not part of the container API; `run.sh` provides a temporary localhost forwarder for the included frontend workflow, while direct access through other containers' bridge IPs depends on host firewall policy.
 - Go's active session map is in memory. A daemon failure stops its namespace children through the parent-death signal; Java can reconcile stale records after restart, but container survival across a Go daemon failure is not part of the current MiniDock workflow.
 - The rootfs remains writable, and the namespace setup is basic isolation for learning and local workloads. Running hostile workloads is outside this project's intended use; production-grade security hardening is not a current requirement.
 
