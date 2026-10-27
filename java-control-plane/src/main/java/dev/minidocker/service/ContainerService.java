@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
@@ -60,6 +61,7 @@ public class ContainerService {
         String networkIp = validated.network() ? ipAllocator.allocate(id) : "";
         Path containerDirectory = containersDirectory.resolve(id);
         Path rootfs = containerDirectory.resolve("rootfs");
+        Path containerLog = containerDirectory.resolve("container.log");
         if (!containerDirectory.startsWith(containersDirectory)) {
             throw new IllegalStateException("generated container path escaped its data directory");
         }
@@ -91,7 +93,7 @@ public class ContainerService {
                     networkIp,
                     validated.attach(),
                     validated.tty(),
-                    containerDirectory.resolve("container.log").toString());
+                    containerLog.toString());
             RuntimeGateway.Execution execution = runtime.run(config);
             if (record.start(execution)) {
                 execution.completion().whenComplete((result, failure) -> {
@@ -118,7 +120,9 @@ public class ContainerService {
             ipAllocator.release(id);
             if (!(failure instanceof RuntimeGateway.StartCleanupException)) {
                 try {
-                    RootfsExtractor.deleteTree(containerDirectory);
+                    Path cleanupTarget = Files.isRegularFile(containerLog, LinkOption.NOFOLLOW_LINKS)
+                            ? rootfs : containerDirectory;
+                    RootfsExtractor.deleteTree(cleanupTarget);
                 } catch (IOException cleanupError) {
                     failure.addSuppressed(cleanupError);
                 }
