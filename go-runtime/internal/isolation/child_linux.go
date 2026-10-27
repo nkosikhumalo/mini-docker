@@ -38,6 +38,15 @@ type ChildStarter struct {
 // namespaces. It does not require a privileged command; Linux permissions
 // determine whether the kernel permits these namespaces for this caller.
 func (starter ChildStarter) StartPaused(ctx context.Context, config container.Config) (container.Child, error) {
+	// Keep an open handle to the running runtime instead of re-executing its
+	// pathname. Namespace UID mappings can make a root daemon's child unable
+	// to traverse a private home directory such as /home/nkosi (mode 0750).
+	executable, err := os.Open("/proc/self/exe")
+	if err != nil {
+		return nil, fmt.Errorf("open runtime executable for namespace child: %w", err)
+	}
+	defer executable.Close()
+
 	r, w, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("create child release pipe: %w", err)
@@ -48,7 +57,7 @@ func (starter ChildStarter) StartPaused(ctx context.Context, config container.Co
 		_ = w.Close()
 		return nil, fmt.Errorf("create child setup acknowledgement pipe: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, os.Args[0])
+	cmd := exec.CommandContext(ctx, "/proc/self/fd/5")
 	child := &Child{cmd: cmd}
 	var inherited []*os.File
 	var logFile *os.File
@@ -161,7 +170,7 @@ func (starter ChildStarter) StartPaused(ctx context.Context, config container.Co
 		}
 	}
 	cmd.Env = append(os.Environ(), childEnv+"=1")
-	cmd.ExtraFiles = []*os.File{r, readyW}
+	cmd.ExtraFiles = []*os.File{r, readyW, executable}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET | syscall.CLONE_NEWUTS | syscall.CLONE_NEWIPC,
 		Pdeathsig:                  syscall.SIGKILL,
@@ -363,13 +372,19 @@ func (c *Child) verifyNamespaces() error {
 }
 
 // RunChild is called at the start of main when the process was re-executed by
-// ChildStarter. It reads the config from fd 3, then replaces itself with the
-// requested executable. The caller should exit with the returned status.
+// ChildStarter. It reads config from fd 3, closes the inherited runtime handle
+// at fd 5, then replaces itself with the requested executable. The caller
+// should exit with the returned status.
 func RunChild() (int, error) {
 	runtime.LockOSThread()
 	if os.Getenv(childEnv) != "1" {
 		return 0, errors.New("not a minidock namespace child")
 	}
+	executable := os.NewFile(5, "minidock-runtime-executable")
+	if executable == nil {
+		return 1, errors.New("missing inherited runtime executable")
+	}
+	_ = executable.Close()
 	fd := os.NewFile(3, "minidock-child-config")
 	if fd == nil {
 		return 0, errors.New("missing child configuration pipe")
