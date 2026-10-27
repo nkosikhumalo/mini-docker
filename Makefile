@@ -11,8 +11,8 @@ build: build-go build-java
 
 build-go:
 	mkdir -p bin
-	cd go-runtime && GOCACHE=$(GO_CACHE) go build -o ../bin/minidockd ./cmd/minidockd
-	cd go-runtime && GOCACHE=$(GO_CACHE) go build -o ../bin/minidock-attach ./cmd/minidock
+	cd go-runtime && CGO_ENABLED=0 GOCACHE=$(GO_CACHE) go build -o ../bin/minidockd ./cmd/minidockd
+	cd go-runtime && CGO_ENABLED=0 GOCACHE=$(GO_CACHE) go build -o ../bin/minidock-attach ./cmd/minidock
 
 build-java:
 	cd java-control-plane && ./mvnw $(MAVEN_ARGS) -DskipTests package
