@@ -3,8 +3,9 @@ GO_CACHE ?= /tmp/minidock-go-cache
 INTEGRATION_GO_CACHE ?= /tmp/minidock-root-go-cache
 SUDO ?= sudo
 GO_BIN ?= $(shell command -v go || { test ! -x /usr/local/go/bin/go || echo /usr/local/go/bin/go; })
+MAVEN_ARGS ?=
 
-.PHONY: build build-go build-java test test-go test-java test-integration e2e run-go run-java clean
+.PHONY: build build-go build-java test test-go test-java test-ask test-integration e2e run-go run-java clean
 
 build: build-go build-java
 
@@ -14,15 +15,19 @@ build-go:
 	cd go-runtime && GOCACHE=$(GO_CACHE) go build -o ../bin/minidock-attach ./cmd/minidock
 
 build-java:
-	cd java-control-plane && ./mvnw -DskipTests package
+	cd java-control-plane && ./mvnw $(MAVEN_ARGS) -DskipTests package
 
-test: test-go test-java
+test: test-go test-java test-ask
 
 test-go:
 	cd go-runtime && GOCACHE=$(GO_CACHE) go test ./... && GOCACHE=$(GO_CACHE) go vet ./...
 
 test-java:
-	cd java-control-plane && ./mvnw test
+	cd java-control-plane && ./mvnw $(MAVEN_ARGS) test
+
+test-ask:
+	python3 scripts/test-minidock-ask.py
+	bash scripts/test-minidock-ask-cli.sh
 
 # Run explicitly: root privileges may be needed for kernel namespaces and mounts.
 test-integration:
@@ -41,4 +46,4 @@ run-java:
 
 clean:
 	rm -f bin/minidockd bin/minidock-attach
-	cd java-control-plane && ./mvnw clean
+	cd java-control-plane && ./mvnw $(MAVEN_ARGS) clean
