@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -38,6 +39,14 @@ type ChildStarter struct {
 // namespaces. It does not require a privileged command; Linux permissions
 // determine whether the kernel permits these namespaces for this caller.
 func (starter ChildStarter) StartPaused(ctx context.Context, config container.Config) (container.Child, error) {
+	hostUID, err := mappedHostID("MINIDOCK_HOST_UID", "SUDO_UID", os.Getuid())
+	if err != nil {
+		return nil, err
+	}
+	hostGID, err := mappedHostID("MINIDOCK_HOST_GID", "SUDO_GID", os.Getgid())
+	if err != nil {
+		return nil, err
+	}
 	// Keep an open handle to the running runtime instead of re-executing its
 	// pathname. Namespace UID mappings can make a root daemon's child unable
 	// to traverse a private home directory such as /home/nkosi (mode 0750).
@@ -174,8 +183,8 @@ func (starter ChildStarter) StartPaused(ctx context.Context, config container.Co
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWNET | syscall.CLONE_NEWUTS | syscall.CLONE_NEWIPC,
 		Pdeathsig:                  syscall.SIGKILL,
-		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
-		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: hostUID, Size: 1}},
+		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: hostGID, Size: 1}},
 		GidMappingsEnableSetgroups: false,
 	}
 	if config.TTY {
@@ -222,6 +231,21 @@ func (starter ChildStarter) StartPaused(ctx context.Context, config container.Co
 		return nil, err
 	}
 	return child, nil
+}
+
+func mappedHostID(configKey, sudoKey string, fallback int) (int, error) {
+	value := os.Getenv(configKey)
+	if value == "" && os.Geteuid() == 0 {
+		value = os.Getenv(sudoKey)
+	}
+	if value == "" {
+		return fallback, nil
+	}
+	id, err := strconv.Atoi(value)
+	if err != nil || id < 0 {
+		return 0, fmt.Errorf("invalid %s value %q", configKey, value)
+	}
+	return id, nil
 }
 
 func defaultContainerRoot() string {
