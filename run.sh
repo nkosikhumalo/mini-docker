@@ -64,6 +64,7 @@ make -C "$repo" build MAVEN_ARGS="-Dmaven.repo.local=$maven_cache"
 
 echo "[2/2] Starting MiniDock services..."
 sudo -E env MINIDOCK_SOCKET="$socket_path" MINIDOCK_SOCKET_GID="$(id -g)" \
+  MINIDOCK_HOST_UID="$(id -u)" MINIDOCK_HOST_GID="$(id -g)" \
   MINIDOCK_CONTAINERS_DIR="$containers_dir" \
   MINIDOCK_CGROUP_ROOT="${MINIDOCK_CGROUP_ROOT:-}" \
   "$repo/bin/minidockd" >"$go_log" 2>&1 &
