@@ -89,7 +89,7 @@ case "$command_name" in
     fi
     response=$(curl --fail-with-body -sS -F "name=$name" -F "archive=@$archive" "$api/api/v1/images")
     printf '%s' "$response" | ui_render build
-    if [[ -n $temporary_archive && -f $input/package.json ]]; then
+    if [[ -n $temporary_archive && -f $input/package.json ]] && python3 -c 'import json,sys; p=json.load(open(sys.argv[1], encoding="utf-8")); d={**p.get("dependencies", {}), **p.get("devDependencies", {})}; sys.exit(0 if "vite" in d and p.get("scripts", {}).get("build") else 1)' "$input/package.json"; then
       container_port=${MINIDOCK_CONTAINER_PORT:-8080}
       cat <<EOF
 
