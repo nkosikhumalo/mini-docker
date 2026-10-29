@@ -128,7 +128,15 @@ container PTY, including terminal resize and exit-code forwarding. Java exposes 
 
 For a web frontend, the rootfs also needs a web server and the app must listen
 on a container interface. MiniDock's `run` command still has no `-p` host-port
-publishing option. A static bundle alone is not a running web app.
+publishing by default. The dashboard's run form defaults the app port inside the
+container to 8080; MiniDock selects a free host port and forwards
+`127.0.0.1:<assigned-port>` to it. The URL appears after startup and in the
+container list. Leave the app-port field blank to skip forwarding. The CLI can
+request the same behavior with `bin/minidock run --port 8080 -d IMAGE COMMAND`.
+The forwarder listens on loopback only, so the URL is available on the MiniDock
+host and is not exposed to the LAN. The application must listen on a container
+interface such as `0.0.0.0:8080`; binding only to `127.0.0.1` inside its
+container will not work. A static bundle alone is not a running web app.
 
 `minidock ask "run a small shell with 64 MB of memory"` asks OpenRouter to
 translate a request into a MiniDock run configuration. It only offers images
@@ -155,6 +163,14 @@ model output never becomes a shell command. Project build scripts and Maven
 plugins run on the host with your user permissions. Only a successfully built
 and uploaded archive replaces an image with the same name. The staging response
 includes the stored archive path.
+
+The same chat can propose starting a staged image. For a source image whose
+adapter provides a known start command, MiniDock supplies that exact command;
+for other images, the chat asks you for the executable and arguments. It checks
+that the image exists locally, shows the full command and app port for review,
+and starts it only after confirmation. Commands are passed as argument arrays,
+not through a shell. The chat view displays user and MiniDock messages in
+separate colored panels.
 
 After a dashboard AI build, **Run this image** pre-fills the adapter's expected
 command and the selected project's `.env` path. The dashboard reads simple
