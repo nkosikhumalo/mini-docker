@@ -134,9 +134,12 @@ environment values in an `ask` prompt.
 
 `bin/minidock ask-build [-t NAME] PROJECT_DIR "what you want to build"` sends
 OpenRouter a small project profile (manifest/dependency metadata, not source
-files or `.env` values). It explains what it detects and ranks only recipes the
-local builder supports. Use the up/down arrows and Enter to choose, then review
-and confirm. Vite offers source build or packaging existing `dist/`; Maven
+files or `.env` values). The dashboard's AI build chat can explain what it
+detects, ask follow-up questions, and rank only recipes the local builder
+supports. In the dashboard, type into the chat box and press Enter; use Tab to
+edit the project folder. Use the up/down arrows and Enter to choose a recipe,
+then confirm the build.
+Vite offers source build or packaging existing `dist/`; Maven
 offers a new Maven build or packaging an existing executable JAR; Go currently
 offers a Linux binary build. MiniDock maps each choice to fixed adapter code;
 model output never becomes a shell command. Project build scripts and Maven
