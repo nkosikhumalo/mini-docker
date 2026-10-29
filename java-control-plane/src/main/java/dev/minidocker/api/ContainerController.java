@@ -1,6 +1,7 @@
 package dev.minidocker.api;
 
 import dev.minidocker.service.ContainerNotFoundException;
+import dev.minidocker.service.ContainerDeletionException;
 import dev.minidocker.service.ContainerService;
 import dev.minidocker.image.ImageNotFoundException;
 import io.grpc.Status;
@@ -61,6 +62,17 @@ public class ContainerController {
     @DeleteMapping("/{id}")
     public ContainerView stop(@PathVariable("id") String id) {
         return containers.stop(id);
+    }
+
+    @DeleteMapping("/{id}/record")
+    public ResponseEntity<Void> delete(@PathVariable("id") String id) throws IOException {
+        containers.delete(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    @ExceptionHandler(ContainerDeletionException.class)
+    public ResponseEntity<Map<String, String>> deleteFailure(ContainerDeletionException error) {
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", error.getMessage()));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
