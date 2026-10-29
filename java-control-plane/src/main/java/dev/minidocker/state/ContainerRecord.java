@@ -14,6 +14,7 @@ public final class ContainerRecord {
     private volatile String networkIp;
     private volatile Integer containerPort;
     private volatile Integer publishedPort;
+    private volatile boolean portReady;
     private final Instant createdAt;
     private final Consumer<ContainerView> persist;
     private volatile ContainerStatus status = ContainerStatus.PREPARING;
@@ -43,6 +44,7 @@ public final class ContainerRecord {
         this.networkIp = saved.networkIp();
         this.containerPort = saved.containerPort();
         this.publishedPort = saved.publishedPort();
+        this.portReady = saved.portReady();
         this.createdAt = saved.createdAt() == null ? Instant.now() : saved.createdAt();
         this.startedAt = saved.startedAt();
         this.finishedAt = saved.finishedAt();
@@ -62,7 +64,7 @@ public final class ContainerRecord {
                                             Consumer<ContainerView> persist) {
         Instant now = Instant.now();
         ContainerView metadata = new ContainerView(id, "<recovered>", List.of(), networkIp, pid,
-                ContainerStatus.RUNNING, now, now, null, null, null, null, null);
+                ContainerStatus.RUNNING, now, now, null, null, null, null, null, false);
         ContainerRecord record = new ContainerRecord(metadata, persist);
         record.execution = execution;
         return record;
@@ -72,6 +74,13 @@ public final class ContainerRecord {
 
     public synchronized void setPublishedPort(Integer port) {
         this.publishedPort = port;
+        this.portReady = false;
+        save();
+    }
+
+    public synchronized void setPortReady(boolean ready) {
+        if (publishedPort == null) return;
+        this.portReady = ready;
         save();
     }
 
@@ -118,6 +127,7 @@ public final class ContainerRecord {
                 status = ContainerStatus.EXITED;
                 exitCode = code;
             }
+            portReady = false;
             execution = null;
         }
         save();
@@ -134,7 +144,7 @@ public final class ContainerRecord {
 
     public synchronized ContainerView view() {
         return new ContainerView(id, image, command, networkIp, pid, status, createdAt, startedAt,
-                finishedAt, exitCode, error, containerPort, publishedPort);
+                finishedAt, exitCode, error, containerPort, publishedPort, portReady);
     }
 
     public void recoverActive(int activePid, String activeIp, RuntimeGateway.Execution running) {
@@ -166,6 +176,7 @@ public final class ContainerRecord {
             } else if (status == ContainerStatus.RUNNING || status == ContainerStatus.STOPPING) {
                 status = ContainerStatus.EXITED;
                 finishedAt = Instant.now();
+                portReady = false;
                 execution = null;
             }
         }
