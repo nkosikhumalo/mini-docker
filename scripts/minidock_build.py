@@ -335,7 +335,26 @@ def main():
         fail(f"project directory does not exist: {project}")
     if not archive.parent.is_dir():
         fail(f"output directory does not exist: {archive.parent}")
-    if (project / "package.json").is_file():
+    package_file = project / "package.json"
+    vite_project = False
+    if package_file.is_file():
+        try:
+            package = json.loads(package_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            package = None
+        if isinstance(package, dict):
+            dependencies = package.get("dependencies", {})
+            dev_dependencies = package.get("devDependencies", {})
+            scripts = package.get("scripts", {})
+            vite_project = (
+                isinstance(dependencies, dict)
+                and isinstance(dev_dependencies, dict)
+                and "vite" in {**dependencies, **dev_dependencies}
+                and isinstance(scripts, dict)
+                and bool(scripts.get("build"))
+            )
+
+    if vite_project:
         if mode == "--from-jar":
             fail("--from-jar only applies to Maven Java projects")
         build_vite(project, archive, repo, mode == "--from-dist")
@@ -347,6 +366,10 @@ def main():
         if mode != "build":
             fail("existing-binary options are not available for Go projects yet")
         build_go(project, archive)
+    elif package_file.is_file():
+        if mode == "--from-jar":
+            fail("--from-jar only applies to Maven Java projects")
+        build_vite(project, archive, repo, mode == "--from-dist")
     else:
         fail("no supported source project detected; supported adapters are Vite, Go main packages, and Maven Java projects")
     print(f"MiniDock image archive created: {archive}")
