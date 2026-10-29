@@ -167,6 +167,10 @@ EOF
       *) echo 'minidock ask-build: selected recipe is not supported' >&2; exit 1 ;;
     esac
     ;;
+  ask-build-turn)
+    [[ $# -eq 2 ]] || usage
+    python3 "$repo/scripts/minidock_ask_build.py" --turn "$1" "$2"
+    ;;
   run)
     memory=
     cpu=
