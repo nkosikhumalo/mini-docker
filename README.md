@@ -77,9 +77,13 @@ Start the MiniDock services with the root `run.sh` script:
 ./run.sh
 ```
 
-It builds MiniDock, starts the Go daemon and Java API, and keeps them running
-until you press Ctrl+C. In another terminal, build and stage the frontend image
-when you're ready:
+It builds MiniDock, starts the Go daemon and Java API, then opens the interactive
+Bubble Tea dashboard. Use it to inspect images and containers, launch a
+container, stop it, and read its logs. Choose **Close dashboard** or press q to
+close the dashboard and stop the services. Press Ctrl+C to stop them as well.
+You can open the dashboard from another terminal with `bin/minidock ui`.
+
+Build and stage an image from another terminal when you're ready:
 
 ```sh
 bin/minidock build -t frontend-app frontend/
