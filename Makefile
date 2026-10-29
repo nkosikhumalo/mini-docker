@@ -13,6 +13,7 @@ build-go:
 	mkdir -p bin
 	cd go-runtime && CGO_ENABLED=0 GOCACHE=$(GO_CACHE) go build -o ../bin/minidockd ./cmd/minidockd
 	cd go-runtime && CGO_ENABLED=0 GOCACHE=$(GO_CACHE) go build -o ../bin/minidock-attach ./cmd/minidock
+	cd go-runtime && CGO_ENABLED=0 GOCACHE=$(GO_CACHE) go build -o ../bin/minidock-ui ./cmd/minidock-ui
 
 build-java:
 	cd java-control-plane && ./mvnw $(MAVEN_ARGS) -DskipTests package
@@ -45,5 +46,5 @@ run-java:
 	cd java-control-plane && ./mvnw spring-boot:run
 
 clean:
-	rm -f bin/minidockd bin/minidock-attach
+	rm -f bin/minidockd bin/minidock-attach bin/minidock-ui
 	cd java-control-plane && ./mvnw $(MAVEN_ARGS) clean
