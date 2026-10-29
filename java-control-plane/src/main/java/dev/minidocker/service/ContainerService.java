@@ -8,6 +8,7 @@ import dev.minidocker.runtime.RuntimeGateway;
 import dev.minidocker.state.ContainerRecord;
 import dev.minidocker.state.ContainerIpAllocator;
 import dev.minidocker.state.ContainerRegistry;
+import dev.minidocker.state.ContainerStatus;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -97,14 +98,9 @@ public class ContainerService {
             RuntimeGateway.Execution execution = runtime.run(config);
             if (record.start(execution)) {
                 execution.completion().whenComplete((result, failure) -> {
-                    record.completed(result == null ? null : result.exitCode(), unwrap(failure));
                     ipAllocator.release(id);
-                    try {
-                        RootfsExtractor.deleteTree(rootfs);
-                    } catch (IOException cleanupError) {
-                        // Runtime state is already final; cleanup failures are visible in server logs.
-                        System.err.println("minidock: failed to clean rootfs for " + id + ": " + cleanupError);
-                    }
+                    cleanupRootfs(id);
+                    record.completed(result == null ? null : result.exitCode(), unwrap(failure));
                 });
             } else {
                 ipAllocator.release(id);
@@ -116,7 +112,6 @@ public class ContainerService {
             }
             return record.view();
         } catch (IOException | RuntimeException failure) {
-            record.preparationFailed(failure);
             ipAllocator.release(id);
             if (!(failure instanceof RuntimeGateway.StartCleanupException)) {
                 try {
@@ -127,6 +122,7 @@ public class ContainerService {
                     failure.addSuppressed(cleanupError);
                 }
             }
+            record.preparationFailed(failure);
             throw failure;
         }
     }
@@ -147,6 +143,30 @@ public class ContainerService {
         ContainerRecord record = registry.require(id);
         record.requestStop();
         return record.view();
+    }
+
+    public void delete(String id) {
+        ContainerRecord record = registry.require(id);
+        ContainerView view = record.view();
+        if (view.status() != ContainerStatus.EXITED
+                && view.status() != ContainerStatus.STOPPED
+                && view.status() != ContainerStatus.FAILED) {
+            throw new IllegalStateException("stop the container and wait for it to finish before deleting it permanently");
+        }
+        if (runtime.listActive().stream().anyMatch(active -> active.id().equals(record.id()))) {
+            throw new IllegalStateException("the runtime still reports this container as active; refusing to remove its files");
+        }
+        Path directory = containersDirectory.resolve(record.id()).normalize();
+        if (!directory.startsWith(containersDirectory) || directory.equals(containersDirectory)) {
+            throw new IllegalStateException("container data path is outside MiniDock's containers directory");
+        }
+        try {
+            RootfsExtractor.deleteTree(directory);
+        } catch (IOException failure) {
+            throw new ContainerDeletionException("could not remove container files for " + id, failure);
+        }
+        registry.remove(record.id());
+        ipAllocator.release(record.id());
     }
 
     public RuntimeGateway.LogChunk logs(String id, long offset, long limit) {
@@ -191,9 +211,9 @@ public class ContainerService {
 
     private void monitorRecovered(ContainerRecord record, RuntimeGateway.Execution execution) {
         execution.completion().whenComplete((result, failure) -> {
-            record.completed(result == null ? null : result.exitCode(), unwrap(failure));
             ipAllocator.release(record.id());
             cleanupRootfs(record.id());
+            record.completed(result == null ? null : result.exitCode(), unwrap(failure));
         });
     }
 
