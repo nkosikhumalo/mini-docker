@@ -22,9 +22,9 @@ api=${api%/}
 
 ui_program() {
   if [[ -x $repo/bin/minidock-ui ]]; then
-    "$repo/bin/minidock-ui" "$@"
+    MINIDOCK_REPO="$repo" "$repo/bin/minidock-ui" "$@"
   else
-    (cd "$repo/go-runtime" && go run ./cmd/minidock-ui "$@")
+    (cd "$repo/go-runtime" && MINIDOCK_REPO="$repo" go run ./cmd/minidock-ui "$@")
   fi
 }
 
@@ -124,10 +124,17 @@ EOF
     printf '%s' "$response" | ui_render container
     ;;
   ask-build)
-    [[ ${1:-} == -t && $# -ge 4 ]] || usage
-    image_name=$2
-    project_dir=$3
-    shift 3
+    image_name=
+    if [[ ${1:-} == -t ]]; then
+      [[ $# -ge 4 ]] || usage
+      image_name=$2
+      project_dir=$3
+      shift 3
+    else
+      [[ $# -ge 2 ]] || usage
+      project_dir=$1
+      shift
+    fi
     prompt=$*
     plan=$(python3 "$repo/scripts/minidock_ask_build.py" "$project_dir" "$image_name" "$prompt") || exit $?
     selection_file=$(mktemp "${TMPDIR:-/tmp}/minidock-build-choice.XXXXXX")
