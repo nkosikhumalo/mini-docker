@@ -79,6 +79,11 @@ host; it targets that Linux architecture and glibc baseline, so the target still
 needs a compatible Linux kernel and userspace ABI. MiniDock images do not run
 directly on Windows or macOS without a Linux VM.
 
+An **image** is the stored root-filesystem template. A **container** is a
+separate process MiniDock starts from that image, with its own isolated
+filesystem, namespaces, and resource limits. Starting the same image twice
+creates two containers.
+
 Start the MiniDock services with the root `run.sh` script:
 
 ```sh
@@ -101,8 +106,10 @@ bin/minidock build -t frontend-app frontend/
 ```
 
 That command builds the image but does not start a container. Its static web
-server listens on container port 8080 when you later choose to run it. Change
-the Java API port with `MINIDOCK_API_PORT` when starting `run.sh`. The
+server listens on container port 8080 when you later choose to run it. Source
+builders embed the startup command and app port in image metadata, so the
+dashboard can start supported images without asking you to type a command.
+Change the Java API port with `MINIDOCK_API_PORT` when starting `run.sh`. The
 frontend's own backend URL comes from its Vite configuration
 (`VITE_API_BASE_URL` or `frontend/.env`); MiniDock's Java API is only the
 image/container control plane.
@@ -127,12 +134,10 @@ container PTY, including terminal resize and exit-code forwarding. Java exposes 
 `/api/v1/images` and `/api/v1/containers`.
 
 For a web frontend, the rootfs also needs a web server and the app must listen
-on a container interface. MiniDock's `run` command still has no `-p` host-port
-publishing by default. The dashboard's run form defaults the app port inside the
-container to 8080; MiniDock selects a free host port and forwards
-`127.0.0.1:<assigned-port>` to it. The URL appears after startup and in the
-container list. Leave the app-port field blank to skip forwarding. The CLI can
-request the same behavior with `bin/minidock run --port 8080 -d IMAGE COMMAND`.
+on a container interface. When image metadata includes an app port, MiniDock
+selects a free host port and forwards `127.0.0.1:<assigned-port>` to it. The URL
+appears after startup and in the container list. The CLI can override the
+image's app port with `bin/minidock run --port 8080 -d IMAGE COMMAND`.
 The forwarder listens on loopback only, so the URL is available on the MiniDock
 host and is not exposed to the LAN. The application must listen on a container
 interface such as `0.0.0.0:8080`; binding only to `127.0.0.1` inside its
@@ -164,23 +169,15 @@ plugins run on the host with your user permissions. Only a successfully built
 and uploaded archive replaces an image with the same name. The staging response
 includes the stored archive path.
 
-The same chat can propose starting a staged image. For a source image whose
-adapter provides a known start command, MiniDock supplies that exact command;
-for other images, the chat asks you for the executable and arguments. It checks
-that the image exists locally, shows the full command and app port for review,
-and starts it only after confirmation. Commands are passed as argument arrays,
-not through a shell. The chat view displays user and MiniDock messages in
-separate colored panels.
-
-After a dashboard AI build, **Run this image** pre-fills the adapter's expected
-command and the selected project's `.env` path. The dashboard reads simple
-`KEY=value` entries locally and sends them only with that container start
-request. Environment values are not copied into the image, displayed, or saved
-in MiniDock's container records. The application receives those values in its
-process environment, so the application itself can read or transmit them; only
-load a trusted project's env file. For images opened later from the image list,
-enter the command and optional env-file path in the run form. The Java API binds
-to `127.0.0.1` by default so these local requests are not exposed on the LAN;
+In the dashboard, choose **Run a container**, select an image, and press Enter.
+MiniDock reads the startup command and app port from image metadata, starts the
+container, then shows its status and localhost URL. Older images without
+metadata use safe layout-based detection when MiniDock can identify one clear
+entrypoint; otherwise rebuild the image with a source adapter. MiniDock does
+not load the project's `.env` file into the container. Apps that require
+settings such as a database URL need those settings configured separately.
+The chat view shows the user's name in pink and MiniDock AI in bright blue. The
+Java API binds to `127.0.0.1` by default so local requests are not exposed on the LAN;
 `MINIDOCK_API_BIND_ADDRESS` can override that address, but exposing the API
 removes that local-only protection.
 
