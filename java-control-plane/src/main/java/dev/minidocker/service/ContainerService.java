@@ -1,5 +1,7 @@
 package dev.minidocker.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.minidocker.api.ContainerView;
 import dev.minidocker.api.CreateContainerRequest;
 import dev.minidocker.image.ImageStore;
@@ -29,6 +31,7 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Stream;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -37,6 +40,7 @@ public class ContainerService {
     private static final Pattern MEMORY = Pattern.compile("(?i)^([1-9][0-9]*)(B|K|KB|KI|KIB|M|MB|MI|MIB|G|GB|GI|GIB|T|TB|TI|TIB)?$");
     private static final Pattern ENV_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
     private static final long CPU_PERIOD = 100_000;
+    private static final ObjectMapper IMAGE_METADATA = new ObjectMapper();
 
     private final ImageStore images;
     private final RootfsExtractor extractor;
@@ -69,13 +73,7 @@ public class ContainerService {
         if (!containerDirectory.startsWith(containersDirectory)) {
             throw new IllegalStateException("generated container path escaped its data directory");
         }
-        ContainerRecord record;
-        try {
-            record = registry.create(id, validated.image(), validated.command(), networkIp, validated.containerPort());
-        } catch (RuntimeException failure) {
-            ipAllocator.release(id);
-            throw failure;
-        }
+        ContainerRecord record = null;
         try {
             Files.createDirectories(containersDirectory);
             Files.createDirectory(containerDirectory);
@@ -84,10 +82,22 @@ public class ContainerService {
                     PosixFilePermission.OWNER_WRITE,
                     PosixFilePermission.OWNER_EXECUTE));
             extractor.extract(archive, rootfs);
+            ImageRuntimeConfig imageConfig = readImageRuntimeConfig(rootfs);
+            List<String> command = validated.command().isEmpty() ? imageConfig.command() : validated.command();
+            if (command.isEmpty()) {
+                throw new IllegalArgumentException("MiniDock could not identify this image's startup program. Rebuild it with a supported MiniDock source adapter so the image includes startup metadata.");
+            }
+            Integer containerPort = validated.containerPort() == null ? imageConfig.containerPort() : validated.containerPort();
+            if (containerPort != null && !validated.network()) {
+                throw new IllegalArgumentException("port publishing requires container networking");
+            }
+            ContainerRecord containerRecord = registry.create(id, validated.image(), command, networkIp,
+                    containerPort == null ? null : containerPort);
+            record = containerRecord;
             RuntimeGateway.RunConfig config = new RuntimeGateway.RunConfig(
                     id,
                     rootfs.toString(),
-                    validated.command(),
+                    command,
                     validated.environment(),
                     validated.hostname(),
                     validated.memoryMax(),
@@ -99,23 +109,23 @@ public class ContainerService {
                     validated.tty(),
                     containerLog.toString());
             RuntimeGateway.Execution execution = runtime.run(config);
-            if (validated.containerPort() != null) {
+            if (containerPort != null) {
                 try {
                     LocalPortForwarder.Forward forward = LocalPortForwarder.open(
-                            networkIp, validated.containerPort(), null);
+                            networkIp, containerPort, null);
                     publishedPorts.put(id, forward);
-                    record.setPublishedPort(forward.hostPort());
+                    containerRecord.setPublishedPort(forward.hostPort());
                 } catch (IOException publishFailure) {
                     execution.cancel();
                     throw new IOException("could not publish the app port on localhost: " + publishFailure.getMessage(), publishFailure);
                 }
             }
-            if (record.start(execution)) {
+            if (containerRecord.start(execution)) {
                 execution.completion().whenComplete((result, failure) -> {
                     closePublishedPort(id);
                     ipAllocator.release(id);
                     cleanupRootfs(id);
-                    record.completed(result == null ? null : result.exitCode(), unwrap(failure));
+                    containerRecord.completed(result == null ? null : result.exitCode(), unwrap(failure));
                 });
             } else {
                 closePublishedPort(id);
@@ -126,7 +136,7 @@ public class ContainerService {
                     // The stopped record remains visible for the caller to inspect.
                 }
             }
-            return record.view();
+            return containerRecord.view();
         } catch (IOException | RuntimeException failure) {
             closePublishedPort(id);
             ipAllocator.release(id);
@@ -139,7 +149,7 @@ public class ContainerService {
                     failure.addSuppressed(cleanupError);
                 }
             }
-            record.preparationFailed(failure);
+            if (record != null) record.preparationFailed(failure);
             throw failure;
         }
     }
@@ -269,11 +279,12 @@ public class ContainerService {
         if (request.image() == null || request.image().isBlank()) {
             throw new IllegalArgumentException("image is required");
         }
-        if (request.command() == null || request.command().isEmpty()
-                || request.command().getFirst() == null || request.command().getFirst().isBlank()) {
+        List<String> requestedCommand = request.command() == null ? List.of() : request.command();
+        if (!requestedCommand.isEmpty()
+                && (requestedCommand.getFirst() == null || requestedCommand.getFirst().isBlank())) {
             throw new IllegalArgumentException("command must include an executable");
         }
-        for (String argument : request.command()) {
+        for (String argument : requestedCommand) {
             if (argument == null || argument.indexOf('\0') >= 0) {
                 throw new IllegalArgumentException("command arguments cannot be null or contain NUL");
             }
@@ -308,10 +319,59 @@ public class ContainerService {
         if (containerPort != null && !network) {
             throw new IllegalArgumentException("port publishing requires container networking");
         }
-        return new ValidatedRequest(request.image(), List.copyOf(request.command()), List.copyOf(environment),
+        return new ValidatedRequest(request.image(), List.copyOf(requestedCommand), List.copyOf(environment),
                 request.hostname(), memoryMax, cpuQuota, cpuQuota == 0 ? 0 : CPU_PERIOD,
                 network, attach, tty, containerPort);
     }
+
+    private static ImageRuntimeConfig readImageRuntimeConfig(Path rootfs) throws IOException {
+        Path metadata = rootfs.resolve("etc/minidock/image.json").normalize();
+        if (metadata.startsWith(rootfs) && Files.isRegularFile(metadata, LinkOption.NOFOLLOW_LINKS)) {
+            if (Files.size(metadata) > 64 * 1024) throw new IOException("image startup metadata is too large");
+            JsonNode node = IMAGE_METADATA.readTree(Files.readAllBytes(metadata));
+            JsonNode commandNode = node.path("command");
+            if (!commandNode.isArray() || commandNode.isEmpty()) throw new IOException("image startup metadata has no command");
+            List<String> command = new ArrayList<>();
+            for (JsonNode argument : commandNode) {
+                if (!argument.isTextual() || argument.asText().isBlank() || argument.asText().indexOf('\0') >= 0) {
+                    throw new IOException("image startup metadata contains an invalid command argument");
+                }
+                command.add(argument.asText());
+            }
+            JsonNode portNode = node.get("container_port");
+            Integer port = portNode == null || portNode.isNull() ? null : portNode.asInt(-1);
+            if (port != null && (port < 1 || port > 65535)) throw new IOException("image startup metadata has an invalid container port");
+            return new ImageRuntimeConfig(List.copyOf(command), port);
+        }
+
+        Path web = rootfs.resolve("usr/bin/minidock-web");
+        if (Files.isRegularFile(web, LinkOption.NOFOLLOW_LINKS)
+                && Files.isExecutable(web)
+                && Files.isRegularFile(rootfs.resolve("usr/share/minidock/www/index.html"), LinkOption.NOFOLLOW_LINKS)) {
+            return new ImageRuntimeConfig(List.of("/usr/bin/minidock-web", "--root", "/usr/share/minidock/www",
+                    "--listen", "0.0.0.0:8080"), 8080);
+        }
+        Path java = rootfs.resolve("usr/lib/minidock-jre/bin/java");
+        Path jar = rootfs.resolve("opt/minidock/app/app.jar");
+        if (Files.isRegularFile(java, LinkOption.NOFOLLOW_LINKS) && Files.isExecutable(java)
+                && Files.isRegularFile(jar, LinkOption.NOFOLLOW_LINKS)) {
+            return new ImageRuntimeConfig(List.of("/usr/lib/minidock-jre/bin/java", "-jar", "/opt/minidock/app/app.jar"), 8080);
+        }
+        Path binaries = rootfs.resolve("usr/bin");
+        if (Files.isDirectory(binaries, LinkOption.NOFOLLOW_LINKS)) {
+            try (Stream<Path> entries = Files.list(binaries)) {
+                List<Path> executables = entries.filter(path -> Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
+                        .filter(Files::isExecutable).toList();
+                if (executables.size() == 1) {
+                    String relative = rootfs.relativize(executables.getFirst()).toString().replace('\\', '/');
+                    return new ImageRuntimeConfig(List.of("/" + relative), null);
+                }
+            }
+        }
+        return new ImageRuntimeConfig(List.of(), null);
+    }
+
+    private record ImageRuntimeConfig(List<String> command, Integer containerPort) {}
 
     private static long parseMemory(String input) {
         if (input == null || input.isBlank()) return 0;
