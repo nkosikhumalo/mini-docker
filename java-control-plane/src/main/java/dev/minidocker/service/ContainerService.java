@@ -9,6 +9,7 @@ import dev.minidocker.state.ContainerRecord;
 import dev.minidocker.state.ContainerIpAllocator;
 import dev.minidocker.state.ContainerRegistry;
 import dev.minidocker.state.ContainerStatus;
+import jakarta.annotation.PreDestroy;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -27,6 +28,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,6 +44,7 @@ public class ContainerService {
     private final ContainerIpAllocator ipAllocator;
     private final RuntimeGateway runtime;
     private final Path containersDirectory;
+    private final ConcurrentHashMap<String, LocalPortForwarder.Forward> publishedPorts = new ConcurrentHashMap<>();
 
     public ContainerService(ImageStore images, RootfsExtractor extractor, ContainerRegistry registry,
                             ContainerIpAllocator ipAllocator,
@@ -68,7 +71,7 @@ public class ContainerService {
         }
         ContainerRecord record;
         try {
-            record = registry.create(id, validated.image(), validated.command(), networkIp);
+            record = registry.create(id, validated.image(), validated.command(), networkIp, validated.containerPort());
         } catch (RuntimeException failure) {
             ipAllocator.release(id);
             throw failure;
@@ -96,13 +99,26 @@ public class ContainerService {
                     validated.tty(),
                     containerLog.toString());
             RuntimeGateway.Execution execution = runtime.run(config);
+            if (validated.containerPort() != null) {
+                try {
+                    LocalPortForwarder.Forward forward = LocalPortForwarder.open(
+                            networkIp, validated.containerPort(), null);
+                    publishedPorts.put(id, forward);
+                    record.setPublishedPort(forward.hostPort());
+                } catch (IOException publishFailure) {
+                    execution.cancel();
+                    throw new IOException("could not publish the app port on localhost: " + publishFailure.getMessage(), publishFailure);
+                }
+            }
             if (record.start(execution)) {
                 execution.completion().whenComplete((result, failure) -> {
+                    closePublishedPort(id);
                     ipAllocator.release(id);
                     cleanupRootfs(id);
                     record.completed(result == null ? null : result.exitCode(), unwrap(failure));
                 });
             } else {
+                closePublishedPort(id);
                 ipAllocator.release(id);
                 try {
                     RootfsExtractor.deleteTree(containerDirectory);
@@ -112,6 +128,7 @@ public class ContainerService {
             }
             return record.view();
         } catch (IOException | RuntimeException failure) {
+            closePublishedPort(id);
             ipAllocator.release(id);
             if (!(failure instanceof RuntimeGateway.StartCleanupException)) {
                 try {
@@ -166,6 +183,7 @@ public class ContainerService {
             throw new ContainerDeletionException("could not remove container files for " + id, failure);
         }
         registry.remove(record.id());
+        closePublishedPort(id);
         ipAllocator.release(record.id());
     }
 
@@ -197,6 +215,16 @@ public class ContainerService {
                 continue;
             }
             reconciledIds.add(record.id());
+            ContainerView saved = record.view();
+            if (saved.containerPort() != null && saved.publishedPort() != null && !running.networkIp().isBlank()) {
+                try {
+                    publishedPorts.put(record.id(), LocalPortForwarder.open(
+                            running.networkIp(), saved.containerPort(), saved.publishedPort()));
+                } catch (IOException publishFailure) {
+                    record.setPublishedPort(null);
+                    System.err.println("minidock: could not restore localhost port for " + record.id() + ": " + publishFailure);
+                }
+            }
             RuntimeGateway.Execution execution = runtime.recover(running.id(), running.pid());
             record.recoverActive(running.pid(), running.networkIp(), execution);
             monitorRecovered(record, execution);
@@ -211,10 +239,21 @@ public class ContainerService {
 
     private void monitorRecovered(ContainerRecord record, RuntimeGateway.Execution execution) {
         execution.completion().whenComplete((result, failure) -> {
+            closePublishedPort(record.id());
             ipAllocator.release(record.id());
             cleanupRootfs(record.id());
             record.completed(result == null ? null : result.exitCode(), unwrap(failure));
         });
+    }
+
+    private void closePublishedPort(String id) {
+        LocalPortForwarder.Forward forward = publishedPorts.remove(id);
+        if (forward != null) forward.close();
+    }
+
+    @PreDestroy
+    public void closePublishedPorts() {
+        publishedPorts.keySet().forEach(this::closePublishedPort);
     }
 
     private void cleanupRootfs(String id) {
@@ -261,9 +300,17 @@ public class ContainerService {
         if (tty && !suppliedEnvironment.containsKey("TERM")) environment.add("TERM=xterm-256color");
         long memoryMax = parseMemory(request.memoryLimit());
         long cpuQuota = parseCPUQuota(request.cpuLimit());
+        Integer containerPort = request.containerPort();
+        if (containerPort != null && (containerPort < 1 || containerPort > 65535)) {
+            throw new IllegalArgumentException("container_port must be between 1 and 65535");
+        }
+        boolean network = request.network() == null || request.network();
+        if (containerPort != null && !network) {
+            throw new IllegalArgumentException("port publishing requires container networking");
+        }
         return new ValidatedRequest(request.image(), List.copyOf(request.command()), List.copyOf(environment),
                 request.hostname(), memoryMax, cpuQuota, cpuQuota == 0 ? 0 : CPU_PERIOD,
-                request.network() == null || request.network(), attach, tty);
+                network, attach, tty, containerPort);
     }
 
     private static long parseMemory(String input) {
@@ -319,5 +366,5 @@ public class ContainerService {
 
     private record ValidatedRequest(String image, List<String> command, List<String> environment,
                                     String hostname, long memoryMax, long cpuQuota, long cpuPeriod,
-                                    boolean network, boolean attach, boolean tty) {}
+                                    boolean network, boolean attach, boolean tty, Integer containerPort) {}
 }
