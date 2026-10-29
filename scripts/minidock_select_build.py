@@ -23,11 +23,18 @@ def select_with_curses(stdscr, plan):
     options = plan["options"]
     selected = 0
     curses.curs_set(0)
+    try:
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_CYAN, -1)
+        curses.init_pair(2, curses.COLOR_MAGENTA, -1)
+    except curses.error:
+        pass
     while True:
         stdscr.erase()
-        stdscr.addstr(0, 0, "AI project assessment")
+        stdscr.addstr(0, 0, "◆ MINIDOCK  AI PROJECT ASSESSMENT", curses.color_pair(2))
         summary = plan["summary"].replace("\n", " ").replace("\t", " ")
-        stdscr.addstr(2, 0, summary[: max(1, curses.COLS - 1)])
+        stdscr.addstr(2, 0, summary[: max(1, curses.COLS - 1)], curses.color_pair(1))
         stdscr.addstr(4, 0, "Choose a local build recipe (↑/↓, Enter; q cancels):")
         for index, option in enumerate(options):
             marker = ">" if index == selected else " "
@@ -35,9 +42,9 @@ def select_with_curses(stdscr, plan):
             title = f"{marker} {option['title']}{recommendation}"
             description = option["description"]
             if index == selected:
-                stdscr.addstr(6 + index * 3, 0, title[: max(1, curses.COLS - 1)], curses.A_REVERSE)
+                stdscr.addstr(6 + index * 3, 0, title[: max(1, curses.COLS - 1)], curses.A_REVERSE | curses.color_pair(1))
             else:
-                stdscr.addstr(6 + index * 3, 0, title[: max(1, curses.COLS - 1)])
+                stdscr.addstr(6 + index * 3, 0, title[: max(1, curses.COLS - 1)], curses.color_pair(2))
             stdscr.addstr(7 + index * 3, 2, description[: max(1, curses.COLS - 3)])
         stdscr.refresh()
         key = stdscr.getch()
