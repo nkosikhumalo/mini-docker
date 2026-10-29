@@ -40,7 +40,7 @@ Usage:
   minidock images
   minidock ask "describe the container you want"
   minidock ask-build -t NAME PROJECT_DIR "describe the image to build"
-  minidock run [-m MEMORY] [-c CPU] [-d|--detach] [--network|--no-network] IMAGE COMMAND [ARG...]
+  minidock run [-m MEMORY] [-c CPU] [-p|--port CONTAINER_PORT] [-d|--detach] [--network|--no-network] IMAGE COMMAND [ARG...]
   minidock ps [-a|--all]
   minidock stop CONTAINER_ID
   minidock rm CONTAINER_ID
@@ -48,6 +48,7 @@ Usage:
 
 CPU accepts a percentage (50) or CPU count (0.5).
 run attaches stdin/stdout when interactive; use -d to run in the background.
+  --port publishes the app on an automatically assigned localhost port.
 EOF
   exit 2
 }
@@ -175,6 +176,7 @@ EOF
   run)
     memory=
     cpu=
+    container_port=
     network_enabled=true
     attach=true
     tty=false
@@ -182,6 +184,7 @@ EOF
       case "$1" in
         -m|--memory) (($# >= 2)) || usage; memory=$2; shift 2 ;;
         -c|--cpu) (($# >= 2)) || usage; cpu=$2; shift 2 ;;
+        -p|--port) (($# >= 2)) || usage; container_port=$2; shift 2 ;;
         -d|--detach) attach=false; tty=false; shift ;;
         -i|--interactive) attach=true; shift ;;
         -t|--tty) attach=true; tty=true; shift ;;
@@ -197,7 +200,7 @@ EOF
     image=$1
     shift
     if [[ $cpu =~ ^[1-9][0-9]?$ ]]; then cpu="${cpu}%"; fi
-    payload=$(python3 -c 'import json,sys; image,memory,cpu,network,attach,tty=sys.argv[1:7]; command=sys.argv[7:]; print(json.dumps({"image":image,"command":command,"memory_limit":memory or None,"cpu_limit":cpu or None,"network":network == "true","attach":attach == "true","tty":tty == "true"}))' "$image" "$memory" "$cpu" "$network_enabled" "$attach" "$tty" "$@")
+    payload=$(python3 -c 'import json,sys; image,memory,cpu,port,network,attach,tty=sys.argv[1:8]; command=sys.argv[8:]; print(json.dumps({"image":image,"command":command,"memory_limit":memory or None,"cpu_limit":cpu or None,"container_port":int(port) if port else None,"network":network == "true","attach":attach == "true","tty":tty == "true"}))' "$image" "$memory" "$cpu" "$container_port" "$network_enabled" "$attach" "$tty" "$@")
     if ! response=$(curl --fail-with-body -sS -H 'Content-Type: application/json' -d "$payload" "$api/api/v1/containers"); then
       [[ -z $response ]] || printf '%s\n' "$response" >&2
       exit 1
