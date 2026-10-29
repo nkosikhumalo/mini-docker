@@ -71,6 +71,17 @@ public class ContainerRegistry {
 
     public ContainerRecord find(String id) { return records.get(id); }
 
+    public void remove(String id) {
+        ContainerRecord record = require(id);
+        if (!records.remove(id, record)) throw new ContainerNotFoundException(id);
+        try {
+            persist();
+        } catch (RuntimeException failure) {
+            records.putIfAbsent(id, record);
+            throw failure;
+        }
+    }
+
     public ContainerRecord recoverUnknown(RuntimeGateway.ActiveContainer active, RuntimeGateway.Execution execution) {
         ContainerRecord recovered = ContainerRecord.recovered(active.id(), active.networkIp(), active.pid(), execution,
                 ignored -> persist());
