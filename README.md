@@ -35,7 +35,7 @@ defaults to `/tmp/minidock-runtime.sock` and has mode `0660`. Override it with
 ```sh
 bin/minidock build -t alpine-base alpine-minirootfs.tar.gz
 bin/minidock build -t foxvue frontend/
-bin/minidock ask-build -t foxvue frontend/ "Build this frontend as a static website"
+bin/minidock ask-build frontend/ "Help me build this frontend as a static website"
 bin/minidock build -t go-service path/to/go-module/cmd/server
 bin/minidock run -d go-service /usr/bin/server
 bin/minidock build -t java-service path/to/maven-project
@@ -79,7 +79,10 @@ Start the MiniDock services with the root `run.sh` script:
 
 It builds MiniDock, starts the Go daemon and Java API, then opens the interactive
 Bubble Tea dashboard. Use it to inspect images and containers, launch a
-container, stop it, and read its logs. Choose **Close dashboard** or press q to
+container, build an image with AI, stop it, and read its logs. Describe what
+you want to build; the AI can ask follow-up questions and explain the project.
+MiniDock suggests an image name from the project folder, offers supported local
+build recipes, and requires your confirmation before building. Choose **Close dashboard** or press q to
 close the dashboard and stop the services. Press Ctrl+C to stop them as well.
 You can open the dashboard from another terminal with `bin/minidock ui`.
 
@@ -129,7 +132,7 @@ containers detached and prints the normal container response.
 The request text is sent to OpenRouter; do not include secrets or private
 environment values in an `ask` prompt.
 
-`bin/minidock ask-build -t NAME PROJECT_DIR "what you want to build"` sends
+`bin/minidock ask-build [-t NAME] PROJECT_DIR "what you want to build"` sends
 OpenRouter a small project profile (manifest/dependency metadata, not source
 files or `.env` values). It explains what it detects and ranks only recipes the
 local builder supports. Use the up/down arrows and Enter to choose, then review
