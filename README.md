@@ -135,8 +135,12 @@ container PTY, including terminal resize and exit-code forwarding. Java exposes 
 
 For a web frontend, the rootfs also needs a web server and the app must listen
 on a container interface. When image metadata includes an app port, MiniDock
-selects a free host port and forwards `127.0.0.1:<assigned-port>` to it. The URL
-appears after startup and in the container list. The CLI can override the
+binds an available host port and forwards `127.0.0.1:<assigned-port>` to it.
+The dashboard always displays the mapping (for example, `container :8080 →
+localhost:49152`). It labels the mapping as checking until an HTTP response
+comes through that forward, and only then presents the localhost URL as ready.
+This distinguishes the app port from the host port and avoids claiming that a
+container is reachable just because it started. The CLI can override the
 image's app port with `bin/minidock run --port 8080 -d IMAGE COMMAND`.
 The forwarder listens on loopback only, so the URL is available on the MiniDock
 host and is not exposed to the LAN. The application must listen on a container
@@ -171,7 +175,9 @@ includes the stored archive path.
 
 In the dashboard, choose **Run a container**, select an image, and press Enter.
 MiniDock reads the startup command and app port from image metadata, starts the
-container, then shows its status and localhost URL. Older images without
+container, then shows its status and the container-to-host port mapping. It
+shows the localhost URL only after the app answers an HTTP probe through the
+forward. Older images without
 metadata use safe layout-based detection when MiniDock can identify one clear
 entrypoint; otherwise rebuild the image with a source adapter. MiniDock does
 not load the project's `.env` file into the container. Apps that require
