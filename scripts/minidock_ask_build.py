@@ -117,6 +117,47 @@ def inspect_project(project):
     raise ValueError("no supported source project detected; supported adapters are Vite, Go main packages, and Maven Java projects")
 
 
+def suggest_project_directories(project):
+    suggestions = []
+    try:
+        children = sorted(project.iterdir(), key=lambda path: path.name.casefold())
+    except OSError:
+        return suggestions
+    for child in children:
+        if not child.is_dir() or child.name.startswith(".") or child.name in {"node_modules", "target", "vendor", "dist"}:
+            continue
+        try:
+            inspect_project(child)
+            suggestions.append(child.name + "/")
+        except ValueError as error:
+            if "multiple Go command packages found" not in str(error) or not (child / "go.mod").is_file():
+                continue
+            for main_file in sorted((child / "cmd").glob("*/main.go")):
+                try:
+                    source = main_file.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    continue
+                if re.search(r"(?m)^\s*package\s+main\b", source):
+                    suggestions.append(main_file.parent.relative_to(project).as_posix())
+    return suggestions
+
+
+def project_detection_error(project, error):
+    message = str(error)
+    if "no supported source project detected" not in message:
+        return message
+    suggestions = suggest_project_directories(project)
+    if not suggestions:
+        return message
+    shown = ", ".join(suggestions[:8])
+    if len(suggestions) > 8:
+        shown += f", and {len(suggestions) - 8} more"
+    return (
+        f"{project} is not itself a supported project folder. I found supported projects at: {shown}. "
+        "Set the Project folder to one of those paths, then send your message again."
+    )
+
+
 OPTION_DETAILS = {
     "build": {
         "title": "Build the app, then create a static web image",
@@ -294,7 +335,7 @@ def main():
         try:
             profile = inspect_project(project)
         except ValueError as error:
-            fail(str(error))
+            fail(project_detection_error(project, error))
         if image_name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", image_name):
             fail("invalid image name")
         if not image_name:
@@ -346,7 +387,7 @@ def main():
     try:
         profile = inspect_project(project)
     except ValueError as error:
-        fail(str(error))
+        fail(project_detection_error(project, error))
     if not image_name:
         image_name = re.sub(r"[^A-Za-z0-9._-]+", "-", profile["project_name"]).strip(".-_")[:128]
         if not image_name:
