@@ -158,6 +158,17 @@ def project_detection_error(project, error):
     )
 
 
+def project_selected_by_reply(suggestions, reply):
+    text = reply.strip().casefold()
+    matches = []
+    for suggestion in suggestions:
+        path = suggestion.rstrip("/").casefold()
+        name = path.rsplit("/", 1)[-1]
+        if text in {path, name} or re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])", text):
+            matches.append(suggestion)
+    return matches[0] if len(matches) == 1 else None
+
+
 OPTION_DETAILS = {
     "build": {
         "title": "Build the app, then create a static web image",
@@ -187,7 +198,7 @@ OPTION_DETAILS = {
 }
 
 
-def validate_plan(value, profile, image_name):
+def validate_plan(value, profile, image_name, project_dir):
     if not isinstance(value, dict) or set(value) != {"kind", "summary", "recommended_order"} or value["kind"] != "plan":
         raise ValueError("model response must contain kind=plan, summary, and recommended_order")
     summary = value["summary"]
@@ -209,13 +220,14 @@ def validate_plan(value, profile, image_name):
         "summary": summary,
         "builder": profile["detected_builder"],
         "image_name": image_name,
+        "project_dir": project_dir,
         "listen_port": 8080,
         "recommended_order": order,
         "options": [dict(id=key, **OPTION_DETAILS[key]) for key in order],
     }
 
 
-def request_turn(messages, image_name, profile, api_key, model=None, opener=urllib.request.urlopen):
+def request_turn(messages, image_name, profile, project_dir, api_key, model=None, opener=urllib.request.urlopen):
     system = (
         "You are MiniDock's build guide. MiniDock is a deliberately small Linux rootfs image builder and runtime, not Docker/OCI. "
         "Current source adapters are Vite static sites, Go main packages compiled as CGO-disabled Linux binaries, and Maven "
@@ -234,6 +246,7 @@ def request_turn(messages, image_name, profile, api_key, model=None, opener=urll
     )
     context = json.dumps({
         "requested_image_name": image_name,
+        "project_directory": project_dir,
         "project_profile": profile,
         "available_options": profile["available_options"],
     }, ensure_ascii=False)
@@ -276,7 +289,7 @@ def request_turn(messages, image_name, profile, api_key, model=None, opener=urll
     except (ValueError, KeyError, IndexError, TypeError):
         raise RuntimeError("OpenRouter returned an invalid or empty JSON completion") from None
     if isinstance(answer, dict) and answer.get("kind") == "plan":
-        return validate_plan(answer, profile, image_name)
+        return validate_plan(answer, profile, image_name, project_dir)
     if isinstance(answer, dict) and set(answer) == {"kind", "message"} and answer["kind"] == "message":
         message = answer["message"]
         if (
@@ -286,7 +299,7 @@ def request_turn(messages, image_name, profile, api_key, model=None, opener=urll
             or any(unicodedata.category(char) == "Cc" and char not in "\t\n" for char in message)
         ):
             raise RuntimeError("OpenRouter returned an invalid chat message")
-        return {"kind": "message", "message": message.strip()}
+        return {"kind": "message", "message": message.strip(), "project_dir": project_dir}
     if not isinstance(answer, dict) or set(answer) != {"kind", "question"} or answer["kind"] != "question":
         raise RuntimeError("OpenRouter returned an unsupported response; expected a question or build plan")
     question = answer["question"]
@@ -297,14 +310,14 @@ def request_turn(messages, image_name, profile, api_key, model=None, opener=urll
         or any(unicodedata.category(char) == "Cc" for char in question)
     ):
         raise RuntimeError("OpenRouter returned an invalid follow-up question")
-    return {"kind": "question", "question": question.strip()}
+    return {"kind": "question", "question": question.strip(), "project_dir": project_dir}
 
 
-def request_plan(prompt, image_name, profile, api_key, model=None, opener=urllib.request.urlopen):
+def request_plan(prompt, image_name, profile, project_dir, api_key, model=None, opener=urllib.request.urlopen):
     messages = [{"role": "user", "content": prompt}]
     follow_ups = 0
     while True:
-        answer = request_turn(messages, image_name, profile, api_key, model, opener)
+        answer = request_turn(messages, image_name, profile, project_dir, api_key, model, opener)
         if answer["kind"] == "plan":
             return answer
         if follow_ups >= MAX_FOLLOW_UPS:
@@ -331,17 +344,11 @@ def main():
         project_arg, image_name = sys.argv[2:]
         project = Path(project_arg).expanduser().resolve()
         if not project.is_dir():
-            fail(f"project directory does not exist: {project}")
-        try:
-            profile = inspect_project(project)
-        except ValueError as error:
-            fail(project_detection_error(project, error))
-        if image_name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", image_name):
-            fail("invalid image name")
-        if not image_name:
-            image_name = re.sub(r"[^A-Za-z0-9._-]+", "-", profile["project_name"]).strip(".-_")[:128]
-            if not image_name:
-                image_name = "minidock-image"
+            print(json.dumps({
+                "kind": "message",
+                "message": f"I can't find the project folder {project}. Use Tab to set its location, then send your message again.",
+            }, separators=(",", ":")))
+            return
         try:
             payload = json.loads(sys.stdin.read(24 << 10))
         except ValueError:
@@ -362,11 +369,42 @@ def main():
                 fail("chat messages must alternate user and assistant text and stay within 2000 characters")
         if messages[-1]["role"] != "user":
             fail("the last chat message must be from the user")
+        try:
+            profile = inspect_project(project)
+            project_dir = project
+        except ValueError as error:
+            suggestions = suggest_project_directories(project)
+            selected = project_selected_by_reply(suggestions, messages[-1]["content"])
+            if not selected:
+                if not suggestions:
+                    message = project_detection_error(project, error)
+                    print(json.dumps({"kind": "message", "message": message}, separators=(",", ":")))
+                    return
+                shown = ", ".join(suggestions[:8])
+                if len(suggestions) > 8:
+                    shown += f", and {len(suggestions) - 8} more"
+                print(json.dumps({
+                    "kind": "question",
+                    "question": f"I found these projects here: {shown}. Which one would you like to build? Reply with its folder name.",
+                }, separators=(",", ":")))
+                return
+            project_dir = (project / selected).resolve()
+            try:
+                profile = inspect_project(project_dir)
+            except ValueError as selected_error:
+                print(json.dumps({"kind": "message", "message": str(selected_error)}, separators=(",", ":")))
+                return
+        if image_name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", image_name):
+            fail("invalid image name")
+        if not image_name:
+            image_name = re.sub(r"[^A-Za-z0-9._-]+", "-", profile["project_name"]).strip(".-_")[:128]
+            if not image_name:
+                image_name = "minidock-image"
         api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if not api_key:
             fail("OPENROUTER_API_KEY is missing; add it to the repository .env file or export it in your shell")
         try:
-            answer = request_turn(messages, image_name, profile, api_key, os.environ.get("OPENROUTER_MODEL"))
+            answer = request_turn(messages, image_name, profile, project_dir.as_posix(), api_key, os.environ.get("OPENROUTER_MODEL"))
         except (RuntimeError, ValueError) as error:
             fail(str(error))
         if answer["kind"] != "plan" and len(messages) >= 9:
@@ -396,7 +434,7 @@ def main():
     if not api_key:
         fail("OPENROUTER_API_KEY is missing; add it to the repository .env file or export it in your shell")
     try:
-        plan = request_plan(prompt, image_name, profile, api_key, os.environ.get("OPENROUTER_MODEL"))
+        plan = request_plan(prompt, image_name, profile, project.as_posix(), api_key, os.environ.get("OPENROUTER_MODEL"))
     except (RuntimeError, ValueError) as error:
         fail(str(error))
     print(json.dumps(plan, separators=(",", ":")))
