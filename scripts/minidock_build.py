@@ -101,6 +101,9 @@ def build_vite(project, archive, repo, package_existing_dist=False):
         web_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(webserver, server_dir / "minidock-web")
         shutil.copytree(dist, web_dir)
+        write_image_metadata(rootfs,
+                             ["/usr/bin/minidock-web", "--root", "/usr/share/minidock/www",
+                              "--listen", "0.0.0.0:8080"], 8080)
         with tarfile.open(archive, "w:gz", format=tarfile.PAX_FORMAT) as bundle:
             bundle.add(rootfs, arcname=".")
 
@@ -115,6 +118,15 @@ def clean_project_environment():
 def write_rootfs_archive(rootfs, archive):
     with tarfile.open(archive, "w:gz", format=tarfile.PAX_FORMAT) as bundle:
         bundle.add(rootfs, arcname=".")
+
+
+def write_image_metadata(rootfs, command, container_port=None):
+    metadata = rootfs / "etc" / "minidock" / "image.json"
+    metadata.parent.mkdir(parents=True, exist_ok=True)
+    metadata.write_text(json.dumps({
+        "command": command,
+        "container_port": container_port,
+    }, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
 def go_module_and_package(project):
@@ -157,6 +169,11 @@ def build_go(project, archive):
         executable = rootfs / "usr" / "bin" / safe_name
         executable.parent.mkdir(parents=True)
         shutil.copy2(binary, executable)
+        package_dir = module_root if package == "." else module_root / package[2:]
+        source = (package_dir / "main.go").read_text(encoding="utf-8", errors="replace")
+        port_match = re.search(r'(?s)port\s*:=\s*os\.Getenv\("PORT"\).*?if\s+port\s*==\s*""\s*\{\s*port\s*=\s*"([0-9]{1,5})"', source)
+        default_port = int(port_match.group(1)) if port_match else None
+        write_image_metadata(rootfs, ["/usr/bin/" + safe_name], default_port)
         write_rootfs_archive(rootfs, archive)
     print(f"Run with: bin/minidock run -d IMAGE /usr/bin/{safe_name}")
 
@@ -320,6 +337,7 @@ def build_java(project, archive, package_existing_jar=False):
             cacerts.unlink()
             shutil.copy2(resolved_cacerts, cacerts)
         copy_runtime_libraries(runtime, rootfs)
+        write_image_metadata(rootfs, ["/usr/lib/minidock-jre/bin/java", "-jar", "/opt/minidock/app/app.jar"], 8080)
         write_rootfs_archive(rootfs, archive)
     print("Run with: bin/minidock run -d IMAGE /usr/lib/minidock-jre/bin/java -jar /opt/minidock/app/app.jar")
 
