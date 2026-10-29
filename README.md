@@ -156,6 +156,18 @@ plugins run on the host with your user permissions. Only a successfully built
 and uploaded archive replaces an image with the same name. The staging response
 includes the stored archive path.
 
+After a dashboard AI build, **Run this image** pre-fills the adapter's expected
+command and the selected project's `.env` path. The dashboard reads simple
+`KEY=value` entries locally and sends them only with that container start
+request. Environment values are not copied into the image, displayed, or saved
+in MiniDock's container records. The application receives those values in its
+process environment, so the application itself can read or transmit them; only
+load a trusted project's env file. For images opened later from the image list,
+enter the command and optional env-file path in the run form. The Java API binds
+to `127.0.0.1` by default so these local requests are not exposed on the LAN;
+`MINIDOCK_API_BIND_ADDRESS` can override that address, but exposing the API
+removes that local-only protection.
+
 The CLI loads `OPENROUTER_API_KEY` and optional `OPENROUTER_MODEL` from the
 root-level `.env` file without overriding shell-exported values. The file is
 ignored by Git and has restrictive local permissions. Paste your key after
