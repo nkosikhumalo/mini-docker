@@ -45,9 +45,17 @@ bin/minidock run -it -m 256M -c 50 alpine-base /bin/sh
 bin/minidock run -d foxvue /usr/bin/minidock-web --root /usr/share/minidock/www --listen 0.0.0.0:8080
 bin/minidock run -d --no-network alpine-base /bin/sh -c 'echo hello'
 bin/minidock ps
+bin/minidock ps --all
 bin/minidock stop CONTAINER_ID
+bin/minidock rm CONTAINER_ID
 bin/minidock logs CONTAINER_ID
 ```
+
+The dashboard lists active and finished containers. Press **d** on a finished
+container and confirm to permanently remove its record and saved files. The CLI
+equivalent is `bin/minidock rm CONTAINER_ID`; `bin/minidock ps --all` lists
+finished records too. MiniDock refuses deletion while the runtime still reports
+the container as active.
 
 In an interactive terminal, the CLI uses a colorful Go Bubble Tea/Lip Gloss
 view for image, container, build, and AI results. The AI build recipe picker
@@ -138,7 +146,8 @@ files or `.env` values). The dashboard's AI build chat can explain what it
 detects, ask follow-up questions, and rank only recipes the local builder
 supports. In the dashboard, type into the chat box and press Enter; use Tab to
 edit the project folder. Use the up/down arrows and Enter to choose a recipe,
-then confirm the build.
+then confirm the build. If the selected folder contains multiple supported
+projects, MiniDock asks which one you mean in the chat.
 Vite offers source build or packaging existing `dist/`; Maven
 offers a new Maven build or packaging an existing executable JAR; Go currently
 offers a Linux binary build. MiniDock maps each choice to fixed adapter code;
