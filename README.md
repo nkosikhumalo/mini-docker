@@ -36,6 +36,10 @@ defaults to `/tmp/minidock-runtime.sock` and has mode `0660`. Override it with
 bin/minidock build -t alpine-base alpine-minirootfs.tar.gz
 bin/minidock build -t foxvue frontend/
 bin/minidock ask-build -t foxvue frontend/ "Build this frontend as a static website"
+bin/minidock build -t go-service path/to/go-module/cmd/server
+bin/minidock run -d go-service /usr/bin/server
+bin/minidock build -t java-service path/to/maven-project
+bin/minidock run -d java-service /usr/lib/minidock-jre/bin/java -jar /opt/minidock/app/app.jar
 bin/minidock images
 bin/minidock run -it -m 256M -c 50 alpine-base /bin/sh
 bin/minidock run -d foxvue /usr/bin/minidock-web --root /usr/share/minidock/www --listen 0.0.0.0:8080
@@ -46,12 +50,21 @@ bin/minidock logs CONTAINER_ID
 ```
 
 `build` accepts an existing `.tar` or `.tar.gz` Linux root-filesystem archive,
-or a supported Vite project directory. For Vite projects it runs the project's
-`npm run build` on the host and packages the generated `dist/` assets with
-MiniDock's small static web server. Node.js 20.19+ or 22.12+ and Go must be on
-`PATH`; when `node_modules/` is absent, it installs dependencies with npm.
-Project build scripts execute on the host with your user permissions. Other
+or a supported source directory. Vite projects run their `npm run build` script
+on the host and package `dist/` with MiniDock's static server. Go main packages
+compile to a CGO-disabled Linux binary and package that executable into the
+image. Maven projects build an executable JAR and bundle a minimized Java
+runtime plus its required Linux shared libraries, so the target machine does not
+need Java installed. Vite needs a compatible Node.js and Go toolchain; Go builds
+need Go; Java builds need Maven (or `mvnw`) and a JDK with `jlink`. Project
+build scripts and Maven plugins execute on the host after confirmation. Other
 project types still need to be assembled as a rootfs archive.
+Maven's dependency cache defaults to `/tmp/minidock-maven-cache`; set
+`MINIDOCK_MAVEN_REPO` to use another location.
+The Java image includes the JDK's Linux runtime dependencies from the build
+host; it targets that Linux architecture and glibc baseline, so the target still
+needs a compatible Linux kernel and userspace ABI. MiniDock images do not run
+directly on Windows or macOS without a Linux VM.
 
 Start the MiniDock services with the root `run.sh` script:
 
@@ -108,17 +121,16 @@ The request text is sent to OpenRouter; do not include secrets or private
 environment values in an `ask` prompt.
 
 `bin/minidock ask-build -t NAME PROJECT_DIR "what you want to build"` sends
-OpenRouter a small project profile based on `package.json` (project name,
-dependency names, lockfiles, and whether a production `dist/index.html` exists).
-It does not send source files or `.env` values. The AI explains what it found
-and ranks available choices. Use the up/down arrows and Enter to choose, then
-review and confirm the selected recipe. The current Vite choices are to run the
-project build script and package its output, or, when `dist/` already exists,
-package that output without running npm scripts. MiniDock maps each choice to
-fixed local adapter code; model output never becomes a shell command. Confirmed
-build scripts run on the host with your user permissions. Only a successfully
-built and uploaded archive replaces an image with the same name. The staging
-response includes the stored archive path so you can find the image afterwards.
+OpenRouter a small project profile (manifest/dependency metadata, not source
+files or `.env` values). It explains what it detects and ranks only recipes the
+local builder supports. Use the up/down arrows and Enter to choose, then review
+and confirm. Vite offers source build or packaging existing `dist/`; Maven
+offers a new Maven build or packaging an existing executable JAR; Go currently
+offers a Linux binary build. MiniDock maps each choice to fixed adapter code;
+model output never becomes a shell command. Project build scripts and Maven
+plugins run on the host with your user permissions. Only a successfully built
+and uploaded archive replaces an image with the same name. The staging response
+includes the stored archive path.
 
 The CLI loads `OPENROUTER_API_KEY` and optional `OPENROUTER_MODEL` from the
 root-level `.env` file without overriding shell-exported values. The file is
