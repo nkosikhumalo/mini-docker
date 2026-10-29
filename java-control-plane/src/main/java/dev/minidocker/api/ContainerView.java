@@ -18,5 +18,6 @@ public record ContainerView(
         Integer exitCode,
         String error,
         Integer containerPort,
-        Integer publishedPort) {
+        Integer publishedPort,
+        boolean portReady) {
 }
