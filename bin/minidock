@@ -23,7 +23,7 @@ api=${api%/}
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  minidock build [--from-dist] -t NAME PROJECT_DIR|IMAGE.tar[.gz]
+  minidock build [--from-dist|--from-jar] -t NAME PROJECT_DIR|IMAGE.tar[.gz]
   minidock images
   minidock ask "describe the container you want"
   minidock ask-build -t NAME PROJECT_DIR "describe the image to build"
@@ -45,8 +45,8 @@ shift
 case "$command_name" in
   build)
     build_mode=build
-    if [[ ${1:-} == --from-dist ]]; then
-      build_mode=from-dist
+    if [[ ${1:-} == --from-dist || ${1:-} == --from-jar ]]; then
+      build_mode=${1#--}
       shift
     fi
     [[ ${1:-} == -t && $# -eq 3 ]] || usage
@@ -58,16 +58,19 @@ case "$command_name" in
       trap 'rm -f -- "$temporary_archive"' EXIT
       if [[ $build_mode == from-dist ]]; then
         python3 "$repo/scripts/minidock_build.py" "$input" "$temporary_archive" --from-dist
+      elif [[ $build_mode == from-jar ]]; then
+        python3 "$repo/scripts/minidock_build.py" "$input" "$temporary_archive" --from-jar
       else
         python3 "$repo/scripts/minidock_build.py" "$input" "$temporary_archive"
       fi
       archive=$temporary_archive
     else
+      [[ $build_mode == build ]] || { echo "$build_mode requires a supported source project directory" >&2; exit 2; }
       [[ -f $input ]] || { echo "project directory or image archive not found: $input" >&2; exit 1; }
       archive=$input
     fi
     curl --fail-with-body -sS -F "name=$name" -F "archive=@$archive" "$api/api/v1/images"
-    if [[ -n $temporary_archive ]]; then
+    if [[ -n $temporary_archive && -f $input/package.json ]]; then
       container_port=${MINIDOCK_CONTAINER_PORT:-8080}
       cat <<EOF
 
@@ -131,6 +134,9 @@ EOF
     case "$selected_option" in
       build) "$repo/bin/minidock" build -t "$image_name" "$project_dir" ;;
       package-existing-dist) "$repo/bin/minidock" build --from-dist -t "$image_name" "$project_dir" ;;
+      go-build) "$repo/bin/minidock" build -t "$image_name" "$project_dir" ;;
+      maven-build) "$repo/bin/minidock" build -t "$image_name" "$project_dir" ;;
+      package-existing-jar) "$repo/bin/minidock" build --from-jar -t "$image_name" "$project_dir" ;;
       *) echo 'minidock ask-build: selected recipe is not supported' >&2; exit 1 ;;
     esac
     ;;
