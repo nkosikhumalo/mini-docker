@@ -41,8 +41,9 @@ Usage:
   minidock ask "describe the container you want"
   minidock ask-build -t NAME PROJECT_DIR "describe the image to build"
   minidock run [-m MEMORY] [-c CPU] [-d|--detach] [--network|--no-network] IMAGE COMMAND [ARG...]
-  minidock ps
+  minidock ps [-a|--all]
   minidock stop CONTAINER_ID
+  minidock rm CONTAINER_ID
   minidock logs CONTAINER_ID [OFFSET] [LIMIT]
 
 CPU accepts a percentage (50) or CPU count (0.5).
@@ -215,14 +216,26 @@ EOF
     fi
     ;;
   ps)
-    [[ $# -eq 0 ]] || usage
-    response=$(curl --fail-with-body -sS "$api/api/v1/containers")
+    all=false
+    if [[ $# -eq 1 && ( $1 == -a || $1 == --all ) ]]; then
+      all=true
+    elif [[ $# -ne 0 ]]; then
+      usage
+    fi
+    query=
+    [[ $all == false ]] || query='?all=true'
+    response=$(curl --fail-with-body -sS "$api/api/v1/containers$query")
     printf '%s' "$response" | ui_render containers
     ;;
   stop)
     [[ $# -eq 1 ]] || usage
     response=$(curl --fail-with-body -sS -X DELETE "$api/api/v1/containers/$1")
     printf '%s' "$response" | ui_render stopped
+    ;;
+  rm)
+    [[ $# -eq 1 && $1 =~ ^[[:xdigit:]]{12}$ ]] || usage
+    curl --fail-with-body -sS -X DELETE "$api/api/v1/containers/$1/record" >/dev/null
+    printf 'Removed container %s and its saved files.\n' "$1"
     ;;
   logs)
     (($# >= 1 && $# <= 3)) || usage
