@@ -8,11 +8,23 @@ import sys
 import unicodedata
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 MAX_PROMPT_LENGTH = 2000
 MAX_RESPONSE_BYTES = 32 * 1024
+
+
+def is_executable_jar(path):
+    try:
+        with zipfile.ZipFile(path) as jar:
+            manifest = jar.read("META-INF/MANIFEST.MF").decode("utf-8", errors="replace")
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return False
+    manifest = re.sub(r"\r?\n[ \t]", "", manifest)
+    return re.search(r"(?im)^Main-Class:\s*\S+", manifest) is not None
 
 
 def fail(message):
@@ -22,34 +34,86 @@ def fail(message):
 
 def inspect_project(project):
     package_file = project / "package.json"
-    try:
-        package = json.loads(package_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        raise ValueError(f"could not read {package_file}: {error}") from None
-    if not isinstance(package, dict):
-        raise ValueError("package.json must contain a JSON object")
-    dependencies = package.get("dependencies", {})
-    dev_dependencies = package.get("devDependencies", {})
-    if not isinstance(dependencies, dict) or not isinstance(dev_dependencies, dict):
-        raise ValueError("package.json dependencies and devDependencies must be objects")
-    dependencies = {**dependencies, **dev_dependencies}
-    scripts = package.get("scripts", {})
-    if "vite" not in dependencies or not isinstance(scripts, dict) or not scripts.get("build"):
-        raise ValueError("no supported source builder detected; this version supports Vite projects with a build script")
-    locks = [name for name in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock") if (project / name).is_file()]
-    has_dist = (project / "dist" / "index.html").is_file()
-    options = ["build"]
-    if has_dist:
-        options.append("package-existing-dist")
-    return {
-        "project_name": str(package.get("name", project.name))[:128],
-        "detected_builder": "vite-static",
-        "build_script_present": True,
-        "dependency_names": sorted(dependencies)[:200],
-        "lockfiles": locks,
-        "has_existing_dist": has_dist,
-        "available_options": options,
-    }
+    if package_file.is_file():
+        try:
+            package = json.loads(package_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ValueError(f"could not read {package_file}: {error}") from None
+        if not isinstance(package, dict):
+            raise ValueError("package.json must contain a JSON object")
+        dependencies = package.get("dependencies", {})
+        dev_dependencies = package.get("devDependencies", {})
+        if not isinstance(dependencies, dict) or not isinstance(dev_dependencies, dict):
+            raise ValueError("package.json dependencies and devDependencies must be objects")
+        dependencies = {**dependencies, **dev_dependencies}
+        scripts = package.get("scripts", {})
+        if "vite" in dependencies and isinstance(scripts, dict) and scripts.get("build"):
+            locks = [name for name in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock") if (project / name).is_file()]
+            has_dist = (project / "dist" / "index.html").is_file()
+            options = ["build"]
+            if has_dist:
+                options.append("package-existing-dist")
+            return {
+                "project_name": str(package.get("name", project.name))[:128],
+                "detected_builder": "vite-static",
+                "dependency_names": sorted(dependencies)[:200],
+                "lockfiles": locks,
+                "has_existing_dist": has_dist,
+                "available_options": options,
+            }
+
+    if (project / "pom.xml").is_file():
+        try:
+            pom = ET.parse(project / "pom.xml").getroot()
+        except (ET.ParseError, OSError) as error:
+            raise ValueError(f"could not read pom.xml: {error}") from None
+        def direct_child(name):
+            return next(((node.text or "").strip() for node in list(pom) if node.tag.rsplit("}", 1)[-1] == name), "")
+
+        properties = next((node for node in list(pom) if node.tag.rsplit("}", 1)[-1] == "properties"), None)
+        java_version = "from Maven configuration"
+        if properties is not None:
+            java_version = next(((node.text or "").strip() for node in list(properties)
+                                 if node.tag.rsplit("}", 1)[-1] in ("java.version", "maven.compiler.release")), java_version)
+        artifact = direct_child("artifactId") or project.name
+        existing_jar = any(is_executable_jar(path) for path in (project / "target").glob("*.jar")
+                           if not path.name.endswith(".original"))
+        options = ["maven-build"]
+        if existing_jar:
+            options.append("package-existing-jar")
+        return {
+            "project_name": artifact[:128],
+            "detected_builder": "maven-java",
+            "java_version": java_version[:64],
+            "maven_wrapper": (project / "mvnw").is_file(),
+            "has_existing_jar": existing_jar,
+            "available_options": options,
+        }
+
+    module_root = next((path for path in (project, *project.parents) if (path / "go.mod").is_file()), None)
+    if module_root is not None:
+        package_dir = project
+        if not any(path.suffix == ".go" for path in package_dir.glob("*.go")):
+            candidates = [path.parent for path in package_dir.glob("cmd/*/main.go")]
+            if len(candidates) == 1:
+                package_dir = candidates[0]
+            elif len(candidates) > 1:
+                raise ValueError("multiple Go command packages found; pass the directory of the command to build")
+        main_file = package_dir / "main.go"
+        if not main_file.is_file() or not re.search(r"(?m)^\s*package\s+main\b", main_file.read_text(encoding="utf-8")):
+            raise ValueError("Go builds need a main.go package; pass the directory of the Go command to build")
+        package_path = "." if package_dir == module_root else "./" + package_dir.relative_to(module_root).as_posix()
+        module_match = re.search(r"(?m)^module\s+(\S+)", (module_root / "go.mod").read_text(encoding="utf-8"))
+        binary_name = package_dir.name if package_dir != module_root else module_root.name
+        return {
+            "project_name": binary_name[:128],
+            "detected_builder": "go-binary",
+            "module_name": module_match.group(1)[:160] if module_match else module_root.name[:160],
+            "package_path": package_path,
+            "available_options": ["go-build"],
+        }
+
+    raise ValueError("no supported source project detected; supported adapters are Vite, Go main packages, and Maven Java projects")
 
 
 OPTION_DETAILS = {
@@ -62,6 +126,21 @@ OPTION_DETAILS = {
         "title": "Package the existing production build",
         "description": "Skip npm scripts and package the existing dist/ directory with MiniDock's static server.",
         "recipe": "package existing dist/ and minidock-web; do not run project scripts.",
+    },
+    "go-build": {
+        "title": "Compile a standalone Linux Go image",
+        "description": "Compile the selected Go main package and package the binary into a minimal root filesystem.",
+        "recipe": "GOOS=linux CGO_ENABLED=0 go build; package the static binary under /usr/bin.",
+    },
+    "maven-build": {
+        "title": "Build the Java app and bundle a Java runtime",
+        "description": "Package an executable Maven JAR and a minimized Java runtime inside the image.",
+        "recipe": "mvnw/mvn -Dmaven.test.skip=true package; jlink runtime; bundle executable JAR and required Linux libraries.",
+    },
+    "package-existing-jar": {
+        "title": "Package the existing executable Java JAR",
+        "description": "Skip Maven project build scripts and bundle an existing executable JAR with a Java runtime.",
+        "recipe": "select executable target/*.jar; jlink runtime; bundle JAR and required Linux libraries.",
     },
 }
 
@@ -95,7 +174,11 @@ def validate_plan(value, profile, image_name):
 
 def request_plan(prompt, image_name, profile, api_key, model=None, opener=urllib.request.urlopen):
     system = (
-        "You are MiniDock's build guide. Explain the detected app in plain language and rank all available option IDs "
+        "You are MiniDock's build guide. MiniDock is a deliberately small Linux rootfs image builder and runtime, not Docker/OCI. "
+        "Current source adapters are Vite static sites, Go main packages compiled as CGO-disabled Linux binaries, and Maven "
+        "executable JARs bundled with a jlink Java runtime and required host shared libraries. Images need a compatible Linux "
+        "kernel at run time; the host does not need the language runtime when it is bundled in the image. Explain the detected app "
+        "in plain language and rank all available option IDs "
         "for this project from most suitable to least suitable. The IDs are fixed local recipes, not commands. "
         "You do not create files, execute commands, fetch dependencies, or build images; MiniDock's reviewed local adapter does that. "
         "Return only JSON with exactly summary (one or two short sentences) and recommended_order (every available ID exactly once). "
