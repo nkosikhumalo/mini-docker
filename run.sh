@@ -84,10 +84,13 @@ done
 [[ $ready == true ]] || { echo "Java API did not become ready at $api_url" >&2; exit 1; }
 
 echo
-echo "MiniDock is running. Java API: $api_url"
-echo "Build the frontend image in another terminal when you're ready:"
-echo "  bin/minidock build -t frontend-app frontend/"
-echo "The image build does not start a container. Press Ctrl+C here to stop MiniDock."
+echo "MiniDock services are ready at $api_url."
+if [[ -t 0 && -t 1 ]]; then
+  echo "Opening the MiniDock dashboard; closing it will stop these services."
+  "$repo/bin/minidock-ui" app "$api_url"
+  exit 0
+fi
+echo "No interactive terminal detected; services are running without the dashboard."
 
 while kill -0 "$java_pid" 2>/dev/null && kill -0 "$go_sudo_pid" 2>/dev/null; do
   sleep 1
