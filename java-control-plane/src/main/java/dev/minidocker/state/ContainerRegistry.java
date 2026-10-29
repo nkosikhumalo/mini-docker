@@ -49,8 +49,8 @@ public class ContainerRegistry {
         }
     }
 
-    public ContainerRecord create(String id, String image, List<String> command, String networkIp) {
-        ContainerRecord record = new ContainerRecord(id, image, command, networkIp, ignored -> persist());
+    public ContainerRecord create(String id, String image, List<String> command, String networkIp, Integer containerPort) {
+        ContainerRecord record = new ContainerRecord(id, image, command, networkIp, containerPort, ignored -> persist());
         if (records.putIfAbsent(id, record) != null) {
             throw new IllegalStateException("container ID collision");
         }
