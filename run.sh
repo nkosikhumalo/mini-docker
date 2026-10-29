@@ -87,7 +87,7 @@ echo
 echo "MiniDock services are ready at $api_url."
 if [[ -t 0 && -t 1 ]]; then
   echo "Opening the MiniDock dashboard; closing it will stop these services."
-  "$repo/bin/minidock-ui" app "$api_url"
+  MINIDOCK_REPO="$repo" "$repo/bin/minidock-ui" app "$api_url"
   exit 0
 fi
 echo "No interactive terminal detected; services are running without the dashboard."
