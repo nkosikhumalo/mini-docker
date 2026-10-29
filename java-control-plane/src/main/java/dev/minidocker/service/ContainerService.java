@@ -17,6 +17,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.file.Files;
@@ -109,10 +111,10 @@ public class ContainerService {
                     validated.tty(),
                     containerLog.toString());
             RuntimeGateway.Execution execution = runtime.run(config);
+            LocalPortForwarder.Forward forward = null;
             if (containerPort != null) {
                 try {
-                    LocalPortForwarder.Forward forward = LocalPortForwarder.open(
-                            networkIp, containerPort, null);
+                    forward = LocalPortForwarder.open(networkIp, containerPort, null);
                     publishedPorts.put(id, forward);
                     containerRecord.setPublishedPort(forward.hostPort());
                 } catch (IOException publishFailure) {
@@ -121,6 +123,7 @@ public class ContainerService {
                 }
             }
             if (containerRecord.start(execution)) {
+                if (forward != null) monitorPortReadiness(containerRecord, forward, execution);
                 execution.completion().whenComplete((result, failure) -> {
                     closePublishedPort(id);
                     ipAllocator.release(id);
@@ -228,8 +231,10 @@ public class ContainerService {
             ContainerView saved = record.view();
             if (saved.containerPort() != null && saved.publishedPort() != null && !running.networkIp().isBlank()) {
                 try {
-                    publishedPorts.put(record.id(), LocalPortForwarder.open(
-                            running.networkIp(), saved.containerPort(), saved.publishedPort()));
+                    LocalPortForwarder.Forward forward = LocalPortForwarder.open(
+                            running.networkIp(), saved.containerPort(), saved.publishedPort());
+                    publishedPorts.put(record.id(), forward);
+                    record.setPortReady(false);
                 } catch (IOException publishFailure) {
                     record.setPublishedPort(null);
                     System.err.println("minidock: could not restore localhost port for " + record.id() + ": " + publishFailure);
@@ -248,12 +253,50 @@ public class ContainerService {
     }
 
     private void monitorRecovered(ContainerRecord record, RuntimeGateway.Execution execution) {
+        LocalPortForwarder.Forward forward = publishedPorts.get(record.id());
+        if (forward != null) monitorPortReadiness(record, forward, execution);
         execution.completion().whenComplete((result, failure) -> {
             closePublishedPort(record.id());
             ipAllocator.release(record.id());
             cleanupRootfs(record.id());
             record.completed(result == null ? null : result.exitCode(), unwrap(failure));
         });
+    }
+
+    private void monitorPortReadiness(ContainerRecord record, LocalPortForwarder.Forward forward,
+                                      RuntimeGateway.Execution execution) {
+        Thread.ofVirtual().start(() -> {
+            while (!forward.isClosed() && !execution.completion().isDone()) {
+                if (httpResponds(forward.hostPort())) {
+	                    if (!forward.isClosed() && !execution.completion().isDone()) {
+	                        record.setPortReady(true);
+	                    }
+                    return;
+                }
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        });
+    }
+
+    private static boolean httpResponds(int hostPort) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL("http://127.0.0.1:" + hostPort + "/").openConnection();
+            connection.setConnectTimeout(500);
+            connection.setReadTimeout(500);
+            connection.setInstanceFollowRedirects(false);
+            int status = connection.getResponseCode();
+            return status >= 100 && status < 600;
+        } catch (IOException notReady) {
+            return false;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
     }
 
     private void closePublishedPort(String id) {
