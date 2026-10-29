@@ -8,3 +8,4 @@
 
 # Local API credentials and environment overrides
 /.env
+/bin/minidock-ui
