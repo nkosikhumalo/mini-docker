@@ -20,16 +20,16 @@ fi
 api=${MINIDOCK_API_URL:-http://127.0.0.1:8080}
 api=${api%/}
 
-ui_render() {
-  python3 "$repo/scripts/minidock_ui.py" "$1"
+ui_program() {
+  if [[ -x $repo/bin/minidock-ui ]]; then
+    "$repo/bin/minidock-ui" "$@"
+  else
+    (cd "$repo/go-runtime" && go run ./cmd/minidock-ui "$@")
+  fi
 }
 
-prompt_text() {
-  if [[ -t 2 && ! -v NO_COLOR && ${TERM:-} != dumb ]]; then
-    printf '\033[38;2;250;204;88m%s\033[0m' "$1"
-  else
-    printf '%s' "$1"
-  fi
+ui_render() {
+  ui_program render "$1"
 }
 
 usage() {
@@ -106,7 +106,7 @@ EOF
     }
     spec=$(python3 "$repo/scripts/minidock_ask.py" "$prompt" "$images_json") || exit $?
     printf '%s' "$spec" | ui_render plan
-    read -r -p "$(prompt_text 'Start this container? [y/N] ')" answer
+    read -r -p 'Start this container? [y/N] ' answer
     [[ $answer == y || $answer == Y || $answer == yes || $answer == YES ]] || {
       echo 'Cancelled; no container was started.'
       exit 0
@@ -130,7 +130,7 @@ EOF
     trap 'rm -f -- "$selection_file" "$plan_file"' EXIT
     printf '%s\n' "$plan" > "$plan_file"
     printf 'AI image build recommendations (no files or image changed yet):\n'
-    python3 "$repo/scripts/minidock_select_build.py" "$plan_file" "$selection_file"
+    ui_program select "$plan_file" "$selection_file"
     selected_option=$(cat "$selection_file")
     [[ -n $selected_option ]] || { echo 'Cancelled; no build was started and no image was changed.'; exit 0; }
     option_details=$(python3 -c 'import json,sys; p=json.load(sys.stdin); o=next(x for x in p["options"] if x["id"]==sys.argv[1]); print(json.dumps(o))' "$selected_option" <<<"$plan")
@@ -139,9 +139,9 @@ EOF
     printf '\n'
     cat <<'EOF'
 MiniDock maps this choice to fixed adapter code. It does not run model-generated commands.
-The build recipe may run the project's npm build script on this host with your user permissions.
+The selected build tool and project plugins may execute on this host with your user permissions.
 EOF
-    read -r -p "$(prompt_text 'Build and stage this image? [y/N] ')" answer
+    read -r -p 'Build and stage this image? [y/N] ' answer
     [[ $answer == y || $answer == Y || $answer == yes || $answer == YES ]] || {
       echo 'Cancelled; no build was started and no image was changed.'
       exit 0
