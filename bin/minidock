@@ -36,6 +36,7 @@ usage() {
   cat >&2 <<'EOF'
 Usage:
   minidock build [--from-dist|--from-jar] -t NAME PROJECT_DIR|IMAGE.tar[.gz]
+  minidock ui [API_URL]
   minidock images
   minidock ask "describe the container you want"
   minidock ask-build -t NAME PROJECT_DIR "describe the image to build"
@@ -55,6 +56,10 @@ command_name=${1:-}
 shift
 
 case "$command_name" in
+  ui)
+    (($# <= 1)) || usage
+    ui_program app "${1:-$api}"
+    ;;
   build)
     build_mode=build
     if [[ ${1:-} == --from-dist || ${1:-} == --from-jar ]]; then
