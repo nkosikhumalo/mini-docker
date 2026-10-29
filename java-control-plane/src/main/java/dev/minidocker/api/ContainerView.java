@@ -16,5 +16,7 @@ public record ContainerView(
         Instant startedAt,
         Instant finishedAt,
         Integer exitCode,
-        String error) {
+        String error,
+        Integer containerPort,
+        Integer publishedPort) {
 }
