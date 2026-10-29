@@ -49,8 +49,9 @@ bin/minidock stop CONTAINER_ID
 bin/minidock logs CONTAINER_ID
 ```
 
-In an interactive terminal, the CLI uses a colorful compact view for image,
-container, build, and AI results. Set `NO_COLOR=1` for plain JSON output. When
+In an interactive terminal, the CLI uses a colorful Go Bubble Tea/Lip Gloss
+view for image, container, build, and AI results. The AI build recipe picker
+supports the arrow keys and Enter. Set `NO_COLOR=1` for plain JSON output. When
 output is piped, the API commands keep JSON output for shell scripts.
 
 `build` accepts an existing `.tar` or `.tar.gz` Linux root-filesystem archive,
