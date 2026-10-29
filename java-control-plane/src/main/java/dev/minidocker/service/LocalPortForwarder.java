@@ -39,6 +39,8 @@ final class LocalPortForwarder {
 
         int hostPort() { return listener.getLocalPort(); }
 
+        boolean isClosed() { return listener.isClosed(); }
+
         private void accept() {
             while (!listener.isClosed()) {
                 try {
