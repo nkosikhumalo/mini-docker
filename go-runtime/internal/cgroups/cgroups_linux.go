@@ -42,8 +42,9 @@ func Attach(root, id string, limits Limits, pid int) (func() error, error) {
 // CreateGroup creates a unique cgroup directory and returns its path and
 // cleanup function. The kernel populates control files in that directory.
 func CreateGroup(root, id string) (string, func() error, error) {
-	if !filepath.IsAbs(root) || filepath.Clean(root) == "/" {
-		return "", nil, errors.New("cgroup root must be an absolute non-root path")
+	cleanRoot := filepath.Clean(root)
+	if !filepath.IsAbs(root) || cleanRoot == "/" || cleanRoot == "/sys/fs/cgroup" {
+		return "", nil, errors.New("cgroup root must be an absolute dedicated subtree, not the cgroup hierarchy root")
 	}
 	validID := id != "" && id != "." && id != ".."
 	for _, char := range id {
