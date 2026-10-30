@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -453,12 +452,10 @@ func RunChild() (int, error) {
 	}
 	env := config.Env
 	if env == nil {
-		env = make([]string, 0, len(os.Environ()))
-		for _, item := range os.Environ() {
-			if !strings.HasPrefix(item, childEnv+"=") {
-				env = append(env, item)
-			}
-		}
+		// Never inherit the daemon's environment: it may contain host-only
+		// credentials and service configuration. The API normally supplies
+		// PATH and HOME explicitly; direct runtime callers get safe defaults.
+		env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root"}
 	}
 	syscall.CloseOnExec(int(ready.Fd()))
 	if _, err := ready.Write([]byte{1}); err != nil {
