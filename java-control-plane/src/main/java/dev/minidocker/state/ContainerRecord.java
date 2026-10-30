@@ -72,15 +72,19 @@ public final class ContainerRecord {
 
     public String id() { return id; }
 
-    public synchronized void setPublishedPort(Integer port) {
-        this.publishedPort = port;
-        this.portReady = false;
+    public void setPublishedPort(Integer port) {
+        synchronized (this) {
+            this.publishedPort = port;
+            this.portReady = false;
+        }
         save();
     }
 
-    public synchronized void setPortReady(boolean ready) {
-        if (publishedPort == null) return;
-        this.portReady = ready;
+    public void setPortReady(boolean ready) {
+        synchronized (this) {
+            if (publishedPort == null) return;
+            this.portReady = ready;
+        }
         save();
     }
 
