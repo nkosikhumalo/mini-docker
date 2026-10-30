@@ -90,6 +90,7 @@ type BridgeManager struct {
 	forwardingCleanup func() error
 	natRules          []firewallRule
 	natReady          bool
+	bridgeReady       bool
 	ownedBridge       bool
 }
 
@@ -215,18 +216,24 @@ func (m *BridgeManager) ConfigureWithIP(ctx context.Context, id string, pid int,
 }
 
 func (m *BridgeManager) ensureBridge(ctx context.Context) error {
-	if err := m.runner.Run(ctx, "ip", "link", "show", "dev", m.bridge); err != nil {
-		if err := m.runner.Run(ctx, "ip", "link", "add", "name", m.bridge, "type", "bridge"); err != nil {
-			return fmt.Errorf("create bridge %s: %w", m.bridge, err)
+	if !m.bridgeReady {
+		if !m.ownedBridge {
+			if err := m.runner.Run(ctx, "ip", "link", "show", "dev", m.bridge); err == nil {
+				return fmt.Errorf("bridge %s already exists; refusing to change a host interface MiniDock does not own", m.bridge)
+			}
+			if err := m.runner.Run(ctx, "ip", "link", "add", "name", m.bridge, "type", "bridge"); err != nil {
+				return fmt.Errorf("create bridge %s: %w", m.bridge, err)
+			}
+			m.ownedBridge = true
 		}
-		m.ownedBridge = true
-	}
-	address := fmt.Sprintf("%s/%d", m.gateway.String(), defaultPrefix)
-	if err := m.runner.Run(ctx, "ip", "address", "replace", address, "dev", m.bridge); err != nil {
-		return fmt.Errorf("assign bridge address: %w", err)
-	}
-	if err := m.runner.Run(ctx, "ip", "link", "set", "dev", m.bridge, "up"); err != nil {
-		return fmt.Errorf("bring bridge up: %w", err)
+		address := fmt.Sprintf("%s/%d", m.gateway.String(), defaultPrefix)
+		if err := m.runner.Run(ctx, "ip", "address", "replace", address, "dev", m.bridge); err != nil {
+			return fmt.Errorf("assign bridge address: %w", err)
+		}
+		if err := m.runner.Run(ctx, "ip", "link", "set", "dev", m.bridge, "up"); err != nil {
+			return fmt.Errorf("bring bridge up: %w", err)
+		}
+		m.bridgeReady = true
 	}
 	if !m.natReady {
 		if err := m.enableNAT(ctx); err != nil {
@@ -312,6 +319,7 @@ func (m *BridgeManager) Close() error {
 		}
 		m.ownedBridge = false
 	}
+	m.bridgeReady = false
 	m.natReady = false
 	return result
 }
