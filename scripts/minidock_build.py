@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 from pathlib import PurePosixPath
 from pathlib import Path
+from minidock_project import maven_http_port
 
 
 def fail(message):
@@ -173,6 +174,8 @@ def build_go(project, archive):
         source = (package_dir / "main.go").read_text(encoding="utf-8", errors="replace")
         port_match = re.search(r'(?s)port\s*:=\s*os\.Getenv\("PORT"\).*?if\s+port\s*==\s*""\s*\{\s*port\s*=\s*"([0-9]{1,5})"', source)
         default_port = int(port_match.group(1)) if port_match else None
+        if default_port is not None and not 1 <= default_port <= 65535:
+            default_port = None
         write_image_metadata(rootfs, ["/usr/bin/" + safe_name], default_port)
         write_rootfs_archive(rootfs, archive)
     print(f"Run with: bin/minidock run -d IMAGE /usr/bin/{safe_name}")
@@ -337,7 +340,8 @@ def build_java(project, archive, package_existing_jar=False):
             cacerts.unlink()
             shutil.copy2(resolved_cacerts, cacerts)
         copy_runtime_libraries(runtime, rootfs)
-        write_image_metadata(rootfs, ["/usr/lib/minidock-jre/bin/java", "-jar", "/opt/minidock/app/app.jar"], 8080)
+        write_image_metadata(rootfs, ["/usr/lib/minidock-jre/bin/java", "-jar", "/opt/minidock/app/app.jar"],
+                             maven_http_port(project))
         write_rootfs_archive(rootfs, archive)
     print("Run with: bin/minidock run -d IMAGE /usr/lib/minidock-jre/bin/java -jar /opt/minidock/app/app.jar")
 
