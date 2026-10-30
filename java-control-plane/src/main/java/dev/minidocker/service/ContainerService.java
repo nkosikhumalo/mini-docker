@@ -110,7 +110,6 @@ public class ContainerService {
                     validated.attach(),
                     validated.tty(),
                     containerLog.toString());
-            RuntimeGateway.Execution execution = runtime.run(config);
             LocalPortForwarder.Forward forward = null;
             if (containerPort != null) {
                 try {
@@ -118,10 +117,12 @@ public class ContainerService {
                     publishedPorts.put(id, forward);
                     containerRecord.setPublishedPort(forward.hostPort());
                 } catch (IOException publishFailure) {
-                    execution.cancel();
                     throw new IOException("could not publish the app port on localhost: " + publishFailure.getMessage(), publishFailure);
                 }
             }
+            // Reserve the host port before starting the workload. A bind error
+            // must not leave a running process while the catch path removes its rootfs.
+            RuntimeGateway.Execution execution = runtime.run(config);
             if (containerRecord.start(execution)) {
                 if (forward != null) monitorPortReadiness(containerRecord, forward, execution);
                 execution.completion().whenComplete((result, failure) -> {
@@ -152,7 +153,10 @@ public class ContainerService {
                     failure.addSuppressed(cleanupError);
                 }
             }
-            if (record != null) record.preparationFailed(failure);
+            if (record != null) {
+                record.setPublishedPort(null);
+                record.preparationFailed(failure);
+            }
             throw failure;
         }
     }
@@ -268,9 +272,9 @@ public class ContainerService {
         Thread.ofVirtual().start(() -> {
             while (!forward.isClosed() && !execution.completion().isDone()) {
                 if (httpResponds(forward.hostPort())) {
-	                    if (!forward.isClosed() && !execution.completion().isDone()) {
-	                        record.setPortReady(true);
-	                    }
+                    if (!forward.isClosed() && !execution.completion().isDone()) {
+                        record.setPortReady(true);
+                    }
                     return;
                 }
                 try {
