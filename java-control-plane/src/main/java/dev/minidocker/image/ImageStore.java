@@ -23,7 +23,7 @@ public class ImageStore {
         this.imagesDirectory = Path.of(imagesDirectory).toAbsolutePath().normalize();
     }
 
-    public Path resolveArchive(String image) throws IOException {
+    public synchronized Path resolveArchive(String image) throws IOException {
         if (image == null || !IMAGE_NAME.matcher(image).matches() || image.equals(".") || image.equals("..")) {
             throw new IllegalArgumentException("image must be a simple local image name");
         }
@@ -64,6 +64,8 @@ public class ImageStore {
             Files.deleteIfExists(temporary);
             throw error;
         }
+        String alternateSuffix = suffix.equals(".tar") ? ".tar.gz" : ".tar";
+        Files.deleteIfExists(imagesDirectory.resolve(image + alternateSuffix));
         return destination;
     }
 
