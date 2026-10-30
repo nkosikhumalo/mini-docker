@@ -11,6 +11,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from minidock_project import maven_http_port
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 MAX_PROMPT_LENGTH = 2000
@@ -88,7 +89,7 @@ def inspect_project(project):
             "project_name": artifact[:128],
             "detected_builder": "maven-java",
             "run_command": ["/usr/lib/minidock-jre/bin/java", "-jar", "/opt/minidock/app/app.jar"],
-            "default_port": 8080,
+            "default_port": maven_http_port(project),
             "java_version": java_version[:64],
             "maven_wrapper": (project / "mvnw").is_file(),
             "has_existing_jar": existing_jar,
@@ -113,6 +114,8 @@ def inspect_project(project):
         source = main_file.read_text(encoding="utf-8", errors="replace")
         port_match = re.search(r'(?s)port\s*:=\s*os\.Getenv\("PORT"\).*?if\s+port\s*==\s*""\s*\{\s*port\s*=\s*"([0-9]{1,5})"', source)
         default_port = int(port_match.group(1)) if port_match else None
+        if default_port is not None and not 1 <= default_port <= 65535:
+            default_port = None
         return {
             "project_name": binary_name[:128],
             "detected_builder": "go-binary",
