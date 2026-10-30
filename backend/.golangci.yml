@@ -1,0 +1,22 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - misspell
+    - ineffassign
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - foxvue-api
