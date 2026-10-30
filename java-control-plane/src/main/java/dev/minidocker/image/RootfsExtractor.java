@@ -25,6 +25,7 @@ import java.util.Set;
 @Component
 public class RootfsExtractor {
     private static final long MAX_EXPANDED_BYTES = 8L * 1024 * 1024 * 1024;
+    private static final int MAX_ENTRIES = 250_000;
 
     public void extract(Path archive, Path destination) throws IOException {
         Path root = destination.toAbsolutePath().normalize();
@@ -34,12 +35,16 @@ public class RootfsExtractor {
         Files.createDirectories(root);
         Map<Path, Integer> directories = new LinkedHashMap<>();
         long expanded = 0;
+        int entryCount = 0;
         try (InputStream file = new BufferedInputStream(Files.newInputStream(archive));
              InputStream content = archive.getFileName().toString().endsWith(".gz")
                      ? new GzipCompressorInputStream(file, true) : file;
              TarArchiveInputStream tar = new TarArchiveInputStream(content)) {
             TarArchiveEntry entry;
             while ((entry = tar.getNextTarEntry()) != null) {
+                if (++entryCount > MAX_ENTRIES) {
+                    throw new IOException("image contains more than " + MAX_ENTRIES + " archive entries");
+                }
                 Path output = resolveEntry(root, entry.getName());
                 if (output.equals(root)) {
                     if (!entry.isDirectory()) {
