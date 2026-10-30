@@ -199,7 +199,7 @@ EOF
     (($# >= 2)) || usage
     image=$1
     shift
-    if [[ $cpu =~ ^[1-9][0-9]?$ ]]; then cpu="${cpu}%"; fi
+    if [[ $cpu =~ ^([1-9][0-9]?|100)$ ]]; then cpu="${cpu}%"; fi
     payload=$(python3 -c 'import json,sys; image,memory,cpu,port,network,attach,tty=sys.argv[1:8]; command=sys.argv[8:]; print(json.dumps({"image":image,"command":command,"memory_limit":memory or None,"cpu_limit":cpu or None,"container_port":int(port) if port else None,"network":network == "true","attach":attach == "true","tty":tty == "true"}))' "$image" "$memory" "$cpu" "$container_port" "$network_enabled" "$attach" "$tty" "$@")
     if ! response=$(curl --fail-with-body -sS -H 'Content-Type: application/json' -d "$payload" "$api/api/v1/containers"); then
       [[ -z $response ]] || printf '%s\n' "$response" >&2
