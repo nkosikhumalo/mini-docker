@@ -391,6 +391,7 @@ setup itself; it delegates those operations to Go.
 | --- | --- |
 | `GET /api/v1/images` | List staged images |
 | `POST /api/v1/images` | Stage a `.tar` or `.tar.gz` rootfs |
+| `DELETE /api/v1/images/{name}` | Delete a staged image archive |
 | `POST /api/v1/containers` | Create and start a container |
 | `GET /api/v1/containers` | List active containers |
 | `GET /api/v1/containers?all=true` | Include finished records |
@@ -827,6 +828,7 @@ Common commands:
 
 ```sh
 bin/minidock images                 # list staged images
+bin/minidock image rm IMAGE_NAME    # confirm and delete a staged image
 bin/minidock ps                     # active containers
 bin/minidock ps --all               # include finished containers
 bin/minidock logs CONTAINER_ID       # read output
