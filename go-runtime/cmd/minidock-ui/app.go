@@ -115,41 +115,42 @@ type chatMessage struct {
 type refreshTick time.Time
 
 type appModel struct {
-	apiURL         string
-	screen         appScreen
-	images         []string
-	containers     []containerView
-	selected       int
-	pendingStartID string
-	width          int
-	height         int
-	online         bool
-	loading        bool
-	busy           bool
-	confirmStop    bool
-	confirmDelete  bool
-	deleteID       string
-	notice         string
-	errText        string
-	aiFields       [2]string
-	aiFocus        int
-	aiMessages     []chatMessage
-	aiPlan         *buildPlan
-	aiRunPlan      *aiRunPlan
-	aiImageName    string
-	aiSelected     int
-	aiPending      bool
-	aiConfirm      bool
-	aiRunConfirm   bool
-	buildSession   *buildSession
-	buildLogs      []string
-	buildDone      bool
-	buildErr       string
-	buildPath      string
-	nextSelected   int
-	detail         *containerView
-	logs           string
-	logOffset      int
+	apiURL             string
+	screen             appScreen
+	images             []string
+	containers         []containerView
+	selected           int
+	pendingStartID     string
+	width              int
+	height             int
+	online             bool
+	loading            bool
+	busy               bool
+	confirmStop        bool
+	confirmDelete      bool
+	deleteID           string
+	imageDeleteConfirm string
+	notice             string
+	errText            string
+	aiFields           [2]string
+	aiFocus            int
+	aiMessages         []chatMessage
+	aiPlan             *buildPlan
+	aiRunPlan          *aiRunPlan
+	aiImageName        string
+	aiSelected         int
+	aiPending          bool
+	aiConfirm          bool
+	aiRunConfirm       bool
+	buildSession       *buildSession
+	buildLogs          []string
+	buildDone          bool
+	buildErr           string
+	buildPath          string
+	nextSelected       int
+	detail             *containerView
+	logs               string
+	logOffset          int
 }
 
 func runApp(apiURL string) error {
@@ -247,6 +248,10 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "deleted":
 			m.screen, m.detail = screenContainers, nil
 			m.notice = "Container permanently deleted: " + message.id
+			return m, m.fetchOverview()
+		case "image-deleted":
+			m.imageDeleteConfirm = ""
+			m.notice = "Staged image deleted: " + message.id
 			return m, m.fetchOverview()
 		case "details":
 			m.detail, m.screen = message.container, screenDetails
@@ -374,6 +379,17 @@ func (m appModel) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.imageDeleteConfirm != "" {
+		switch name {
+		case "y", "Y", "enter":
+			image := m.imageDeleteConfirm
+			m.busy = true
+			return m, m.deleteImage(image)
+		case "n", "N", "esc", "q":
+			m.imageDeleteConfirm = ""
+		}
+		return m, nil
+	}
 	if m.screen == screenAIBuild {
 		return m.handleAIBuildKey(key)
 	}
@@ -457,6 +473,10 @@ func (m appModel) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.busy = true
 				m.errText = ""
 				return m, m.startImage(m.images[m.selected])
+			}
+		case "d":
+			if len(m.images) > 0 && m.selected < len(m.images) {
+				m.imageDeleteConfirm = m.images[m.selected]
 			}
 		case "r":
 			m.loading = true
@@ -966,6 +986,16 @@ func (m appModel) deleteContainer(id string) tea.Cmd {
 	}
 }
 
+func (m appModel) deleteImage(image string) tea.Cmd {
+	return func() tea.Msg {
+		path := "/api/v1/images/" + url.PathEscape(image)
+		if err := apiRequest(m.apiURL, http.MethodDelete, path, nil, nil); err != nil {
+			return appResultMsg{action: "image-deleted", id: image, err: err}
+		}
+		return appResultMsg{action: "image-deleted", id: image}
+	}
+}
+
 func (m appModel) fetchDetails(id string) tea.Cmd {
 	return func() tea.Msg {
 		var detail containerView
@@ -1093,7 +1123,11 @@ func (m appModel) View() string {
 			}
 			out.WriteString("  " + style.Render(marker+image) + "\n")
 		}
-		out.WriteString("\n" + mutedStyle.Render("  Enter start selected image · r refresh · Esc back"))
+		if m.imageDeleteConfirm != "" {
+			out.WriteString("\n" + badStyle.Render("  Permanently delete "+clean(m.imageDeleteConfirm)+"? Press y/Enter to confirm or n/Esc to cancel."))
+		} else {
+			out.WriteString("\n" + mutedStyle.Render("  Enter start selected · d delete · r refresh · Esc back"))
+		}
 	case screenContainers:
 		out.WriteString(brandStyle.Render("  CONTAINERS") + "\n\n")
 		if len(m.containers) == 0 {
