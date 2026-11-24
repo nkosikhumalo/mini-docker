@@ -42,33 +42,52 @@ type Forwarder interface{ Enable() (func() error, error) }
 type procForwarder struct{ path string }
 
 func (p procForwarder) Enable() (func() error, error) {
-	value, err := os.ReadFile(p.path)
+	previous, err := p.Read()
 	if err != nil {
-		return nil, fmt.Errorf("read IPv4 forwarding setting: %w", err)
+		return nil, err
 	}
-	previous := strings.TrimSpace(string(value))
 	if previous == "1" {
 		return func() error { return nil }, nil
 	}
 	if previous != "0" {
 		return nil, fmt.Errorf("unexpected IPv4 forwarding value %q", previous)
 	}
-	if err := os.WriteFile(p.path, []byte("1"), 0644); err != nil {
+	if err := p.Set("1"); err != nil {
 		return nil, fmt.Errorf("enable IPv4 forwarding: %w", err)
 	}
-	return func() error {
-		current, err := os.ReadFile(p.path)
-		if err != nil {
-			return fmt.Errorf("read IPv4 forwarding setting during restore: %w", err)
-		}
-		if strings.TrimSpace(string(current)) != "1" {
-			return nil
-		}
-		if err := os.WriteFile(p.path, []byte(previous), 0644); err != nil {
-			return fmt.Errorf("restore IPv4 forwarding setting: %w", err)
-		}
+	return func() error { return p.Restore(previous) }, nil
+}
+
+func (p procForwarder) Read() (string, error) {
+	value, err := os.ReadFile(p.path)
+	if err != nil {
+		return "", fmt.Errorf("read IPv4 forwarding setting: %w", err)
+	}
+	return strings.TrimSpace(string(value)), nil
+}
+
+func (p procForwarder) Set(value string) error {
+	if value != "0" && value != "1" {
+		return fmt.Errorf("invalid IPv4 forwarding value %q", value)
+	}
+	if err := os.WriteFile(p.path, []byte(value), 0644); err != nil {
+		return fmt.Errorf("write IPv4 forwarding setting: %w", err)
+	}
+	return nil
+}
+
+func (p procForwarder) Restore(previous string) error {
+	current, err := p.Read()
+	if err != nil {
+		return fmt.Errorf("read IPv4 forwarding setting during restore: %w", err)
+	}
+	if current != "1" {
 		return nil
-	}, nil
+	}
+	if err := p.Set(previous); err != nil {
+		return fmt.Errorf("restore IPv4 forwarding setting: %w", err)
+	}
+	return nil
 }
 
 type firewallRule struct {
@@ -92,11 +111,15 @@ type BridgeManager struct {
 	natReady          bool
 	bridgeReady       bool
 	ownedBridge       bool
+	statePath         string
+	veths             map[string]bool
+	forwardingRestore string
 }
 
 func NewBridgeManager() *BridgeManager {
 	manager := NewBridgeManagerWithRunner(commandRunner{})
 	manager.forwarder = procForwarder{path: "/proc/sys/net/ipv4/ip_forward"}
+	manager.statePath = defaultOwnershipStatePath()
 	return manager
 }
 
@@ -111,6 +134,7 @@ func NewBridgeManagerWithRunner(runner CommandRunner) *BridgeManager {
 		leases:    make(map[string]string),
 		usedIPv4:  map[string]bool{defaultGateway: true},
 		nextHost:  2,
+		veths:     make(map[string]bool),
 		forwarder: ForwarderFunc(func() (func() error, error) { return func() error { return nil }, nil }),
 	}
 }
@@ -154,14 +178,24 @@ func (m *BridgeManager) ConfigureWithIP(ctx context.Context, id string, pid int,
 	hostIf, peerIf := interfaceNames(id)
 	vethCreated := false
 	removeVeth := func() error {
-		return m.runner.Run(context.Background(), "ip", "link", "del", "dev", hostIf)
+		err := m.runner.Run(context.Background(), "ip", "link", "del", "dev", hostIf)
+		if isMissingLink(err) {
+			return nil
+		}
+		return err
 	}
 	fail := func(err error) (func() error, error) {
-		if !vethCreated {
+		if !vethCreated && !m.veths[hostIf] {
 			rollback()
 			return nil, err
 		}
 		if cleanupErr := removeVeth(); cleanupErr == nil {
+			if vethCreated || m.veths[hostIf] {
+				delete(m.veths, hostIf)
+				if stateErr := m.saveOwnershipLocked(); stateErr != nil {
+					err = errors.Join(err, fmt.Errorf("save network cleanup state: %w", stateErr))
+				}
+			}
 			rollback()
 		} else {
 			err = errors.Join(err, fmt.Errorf("rollback veth setup: %w", cleanupErr))
@@ -173,7 +207,17 @@ func (m *BridgeManager) ConfigureWithIP(ctx context.Context, id string, pid int,
 		rollback()
 		return nil, err
 	}
+	// Write the intended interface name before creating it. On restart, an
+	// absent name is harmless and a created pair can be removed safely.
+	m.veths[hostIf] = true
+	if err := m.saveOwnershipLocked(); err != nil {
+		delete(m.veths, hostIf)
+		rollback()
+		return nil, fmt.Errorf("record veth ownership: %w", err)
+	}
 	if err := m.runner.Run(ctx, "ip", "link", "add", "name", hostIf, "type", "veth", "peer", "name", peerIf); err != nil {
+		delete(m.veths, hostIf)
+		_ = m.saveOwnershipLocked()
 		return fail(fmt.Errorf("create veth pair: %w", err))
 	}
 	vethCreated = true
@@ -210,8 +254,10 @@ func (m *BridgeManager) ConfigureWithIP(ctx context.Context, id string, pid int,
 		if err != nil {
 			return fmt.Errorf("remove veth pair for %q: %w", id, err)
 		}
+		delete(m.veths, hostIf)
+		stateErr := m.saveOwnershipLocked()
 		rollback()
-		return nil
+		return stateErr
 	}, nil
 }
 
@@ -221,10 +267,16 @@ func (m *BridgeManager) ensureBridge(ctx context.Context) error {
 			if err := m.runner.Run(ctx, "ip", "link", "show", "dev", m.bridge); err == nil {
 				return fmt.Errorf("bridge %s already exists; refusing to change a host interface MiniDock does not own", m.bridge)
 			}
+			m.ownedBridge = true
+			if err := m.saveOwnershipLocked(); err != nil {
+				m.ownedBridge = false
+				return fmt.Errorf("record bridge ownership: %w", err)
+			}
 			if err := m.runner.Run(ctx, "ip", "link", "add", "name", m.bridge, "type", "bridge"); err != nil {
+				m.ownedBridge = false
+				_ = m.saveOwnershipLocked()
 				return fmt.Errorf("create bridge %s: %w", m.bridge, err)
 			}
-			m.ownedBridge = true
 		}
 		address := fmt.Sprintf("%s/%d", m.gateway.String(), defaultPrefix)
 		if err := m.runner.Run(ctx, "ip", "address", "replace", address, "dev", m.bridge); err != nil {
@@ -244,7 +296,7 @@ func (m *BridgeManager) ensureBridge(ctx context.Context) error {
 }
 
 func (m *BridgeManager) enableNAT(ctx context.Context) error {
-	cleanupForwarding, err := m.forwarder.Enable()
+	cleanupForwarding, err := m.enableForwarding()
 	if err != nil {
 		return err
 	}
@@ -266,21 +318,94 @@ func (m *BridgeManager) enableNAT(ctx context.Context) error {
 			// not claim ownership and remove it during cleanup.
 			continue
 		}
+		m.natRules = append(m.natRules, rule)
+		if err := m.saveOwnershipLocked(); err != nil {
+			m.natRules = m.natRules[:len(m.natRules)-1]
+			_ = cleanupForwarding()
+			return fmt.Errorf("record firewall rule ownership: %w", err)
+		}
 		add := append([]string{}, rule.args...)
 		add = append([]string{"-t", tableName(rule.table), "-A", rule.chain}, add...)
 		if err := m.runner.Run(ctx, "iptables", add...); err != nil {
-			for i := len(added) - 1; i >= 0; i-- {
-				_ = m.deleteRule(context.Background(), added[i])
+			result := fmt.Errorf("install outbound NAT/forwarding rule: %w", err)
+			if removeErr := m.deleteRule(context.Background(), rule); removeErr == nil {
+				m.forgetRuleLocked(rule)
+			} else {
+				result = errors.Join(result, removeErr)
 			}
-			_ = cleanupForwarding()
-			return fmt.Errorf("install outbound NAT/forwarding rule: %w", err)
+			for i := len(added) - 1; i >= 0; i-- {
+				if removeErr := m.deleteRule(context.Background(), added[i]); removeErr == nil {
+					m.forgetRuleLocked(added[i])
+				} else {
+					result = errors.Join(result, removeErr)
+				}
+			}
+			if restoreErr := cleanupForwarding(); restoreErr == nil {
+				m.forwardingRestore = ""
+				result = errors.Join(result, m.saveOwnershipLocked())
+			} else {
+				result = errors.Join(result, fmt.Errorf("restore IPv4 forwarding after setup failure: %w", restoreErr))
+			}
+			return result
 		}
 		added = append(added, rule)
 	}
-	m.natRules = append(m.natRules, added...)
 	m.forwardingCleanup = cleanupForwarding
 	m.natReady = true
 	return nil
+}
+
+func (m *BridgeManager) forgetRuleLocked(target firewallRule) {
+	for index, rule := range m.natRules {
+		if rule.table != target.table || rule.chain != target.chain || len(rule.args) != len(target.args) {
+			continue
+		}
+		match := true
+		for i := range rule.args {
+			if rule.args[i] != target.args[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			m.natRules = append(m.natRules[:index], m.natRules[index+1:]...)
+			_ = m.saveOwnershipLocked()
+			return
+		}
+	}
+}
+
+func (m *BridgeManager) enableForwarding() (func() error, error) {
+	forwarder, ok := m.forwarder.(interface {
+		Read() (string, error)
+		Set(string) error
+		Restore(string) error
+	})
+	if !ok {
+		return m.forwarder.Enable()
+	}
+	previous, err := forwarder.Read()
+	if err != nil {
+		return nil, err
+	}
+	switch previous {
+	case "1":
+		return func() error { return nil }, nil
+	case "0":
+		m.forwardingRestore = previous
+		if err := m.saveOwnershipLocked(); err != nil {
+			m.forwardingRestore = ""
+			return nil, fmt.Errorf("record IPv4 forwarding state: %w", err)
+		}
+		if err := forwarder.Set("1"); err != nil {
+			m.forwardingRestore = ""
+			_ = m.saveOwnershipLocked()
+			return nil, fmt.Errorf("enable IPv4 forwarding: %w", err)
+		}
+		return func() error { return forwarder.Restore(previous) }, nil
+	default:
+		return nil, fmt.Errorf("unexpected IPv4 forwarding value %q", previous)
+	}
 }
 
 func tableName(table string) string {
@@ -293,8 +418,12 @@ func tableName(table string) string {
 func (m *BridgeManager) deleteRule(ctx context.Context, rule firewallRule) error {
 	args := append([]string{}, rule.args...)
 	args = append([]string{"-t", tableName(rule.table), "-D", rule.chain}, args...)
-	if err := m.runner.Run(ctx, "iptables", args...); err != nil && !strings.Contains(err.Error(), "Bad rule") && !strings.Contains(err.Error(), "No chain/target/match") {
-		return fmt.Errorf("remove iptables rule: %w", err)
+	if err := m.runner.Run(ctx, "iptables", args...); err != nil {
+		message := strings.ToLower(err.Error())
+		if !strings.Contains(message, "bad rule") && !strings.Contains(message, "no chain/target/match") &&
+			!strings.Contains(message, "does a matching rule exist") && !strings.Contains(message, "rule does not exist") {
+			return fmt.Errorf("remove iptables rule: %w", err)
+		}
 	}
 	return nil
 }
@@ -305,22 +434,56 @@ func (m *BridgeManager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var result error
-	for i := len(m.natRules) - 1; i >= 0; i-- {
-		result = errors.Join(result, m.deleteRule(context.Background(), m.natRules[i]))
+	for hostIf := range m.veths {
+		if err := m.deleteVeth(context.Background(), hostIf); err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		delete(m.veths, hostIf)
+		result = errors.Join(result, m.saveOwnershipLocked())
 	}
-	m.natRules = nil
+	for i := len(m.natRules) - 1; i >= 0; i-- {
+		if err := m.deleteRule(context.Background(), m.natRules[i]); err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		m.natRules = append(m.natRules[:i], m.natRules[i+1:]...)
+		result = errors.Join(result, m.saveOwnershipLocked())
+	}
 	if m.forwardingCleanup != nil {
-		result = errors.Join(result, m.forwardingCleanup())
-		m.forwardingCleanup = nil
+		if err := m.forwardingCleanup(); err != nil {
+			result = errors.Join(result, err)
+		} else {
+			m.forwardingCleanup = nil
+			m.forwardingRestore = ""
+			result = errors.Join(result, m.saveOwnershipLocked())
+		}
+	} else if m.forwardingRestore != "" {
+		forwarder, ok := m.forwarder.(interface{ Restore(string) error })
+		if !ok {
+			result = errors.Join(result, errors.New("saved IPv4 forwarding state cannot be restored by this forwarder"))
+		} else if err := forwarder.Restore(m.forwardingRestore); err != nil {
+			result = errors.Join(result, err)
+		} else {
+			m.forwardingRestore = ""
+			result = errors.Join(result, m.saveOwnershipLocked())
+		}
 	}
 	if m.ownedBridge {
-		if err := m.runner.Run(context.Background(), "ip", "link", "del", "dev", m.bridge); err != nil && !strings.Contains(err.Error(), "Cannot find device") {
+		if len(m.veths) != 0 {
+			result = errors.Join(result, errors.New("cannot remove MiniDock bridge while recorded veth cleanup is incomplete"))
+		} else if err := m.runner.Run(context.Background(), "ip", "link", "del", "dev", m.bridge); err != nil && !isMissingLink(err) {
 			result = errors.Join(result, fmt.Errorf("remove bridge: %w", err))
+		} else {
+			m.ownedBridge = false
+			result = errors.Join(result, m.saveOwnershipLocked())
 		}
-		m.ownedBridge = false
 	}
 	m.bridgeReady = false
 	m.natReady = false
+	if result == nil {
+		result = m.removeOwnershipStateLocked()
+	}
 	return result
 }
 
