@@ -41,6 +41,7 @@ import java.util.regex.Pattern;
 public class ContainerService {
     private static final Pattern MEMORY = Pattern.compile("(?i)^([1-9][0-9]*)(B|K|KB|KI|KIB|M|MB|MI|MIB|G|GB|GI|GIB|T|TB|TI|TIB)?$");
     private static final Pattern ENV_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+    private static final Pattern CONTAINER_DIRECTORY = Pattern.compile("[0-9a-f]{12}");
     private static final long CPU_PERIOD = 100_000;
     private static final ObjectMapper IMAGE_METADATA = new ObjectMapper();
 
@@ -253,6 +254,30 @@ public class ContainerService {
             RuntimeGateway.Execution execution = runtime.recover(orphan.id(), orphan.pid());
             ContainerRecord recovered = registry.recoverUnknown(orphan, execution);
             monitorRecovered(recovered, execution);
+        }
+        cleanupOrphanContainerDirectories();
+    }
+
+    private void cleanupOrphanContainerDirectories() {
+        if (!Files.isDirectory(containersDirectory, LinkOption.NOFOLLOW_LINKS)) return;
+        Set<String> recordedIds = new HashSet<>();
+        for (ContainerRecord record : registry.records()) recordedIds.add(record.id());
+        try (var entries = Files.newDirectoryStream(containersDirectory)) {
+            for (Path entry : entries) {
+                Path name = entry.getFileName();
+                if (name == null || !CONTAINER_DIRECTORY.matcher(name.toString()).matches()
+                        || recordedIds.contains(name.toString())
+                        || !Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS)) {
+                    continue;
+                }
+                try {
+                    RootfsExtractor.deleteTree(entry);
+                } catch (IOException failure) {
+                    System.err.println("minidock: could not remove orphan container directory " + name + ": " + failure);
+                }
+            }
+        } catch (IOException failure) {
+            System.err.println("minidock: could not scan for orphan container directories: " + failure);
         }
     }
 
