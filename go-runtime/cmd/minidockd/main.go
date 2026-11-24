@@ -68,6 +68,10 @@ func main() {
 	if err := cgroups.RemoveEmptyGroups(cgroupRoot); err != nil {
 		log.Printf("startup cgroup recovery: %v", err)
 	}
+	networkManager := network.NewBridgeManager()
+	if err := networkManager.RecoverStale(context.Background()); err != nil {
+		log.Fatalf("startup network recovery failed; recorded resources remain for retry: %v", err)
+	}
 	socket := os.Getenv("MINIDOCK_SOCKET")
 	if socket == "" {
 		socket = "/tmp/minidock-runtime.sock"
@@ -108,7 +112,6 @@ func main() {
 	}
 
 	server := grpc.NewServer()
-	networkManager := network.NewBridgeManager()
 	logRoot := os.Getenv("MINIDOCK_CONTAINERS_DIR")
 	if logRoot == "" {
 		home, homeErr := os.UserHomeDir()
