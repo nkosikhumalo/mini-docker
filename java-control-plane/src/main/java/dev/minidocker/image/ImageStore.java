@@ -69,7 +69,7 @@ public class ImageStore {
         return destination;
     }
 
-    public List<String> list() throws IOException {
+    public synchronized List<String> list() throws IOException {
         if (!Files.isDirectory(imagesDirectory)) return List.of();
         List<String> images = new ArrayList<>();
         try (var paths = Files.list(imagesDirectory)) {
@@ -79,5 +79,19 @@ public class ImageStore {
                     .distinct().sorted(Comparator.naturalOrder()).forEach(images::add);
         }
         return List.copyOf(images);
+    }
+
+    public synchronized void delete(String image) throws IOException {
+        if (image == null || !IMAGE_NAME.matcher(image).matches() || image.equals(".") || image.equals("..")) {
+            throw new IllegalArgumentException("image must be a simple local image name");
+        }
+        Path archive = resolveArchive(image);
+        Files.delete(archive);
+        String filename = archive.getFileName().toString();
+        String base = filename.endsWith(".tar.gz")
+                ? filename.substring(0, filename.length() - 7)
+                : filename.substring(0, filename.length() - 4);
+        String alternate = filename.endsWith(".tar.gz") ? base + ".tar" : base + ".tar.gz";
+        Files.deleteIfExists(imagesDirectory.resolve(alternate));
     }
 }
