@@ -46,9 +46,13 @@ that stream after receiving the start acknowledgement.
 
 The runtime does not extract images or persist registry state. Java persists
 container metadata and reconciles it with the active-session RPC. Kernel
-capabilities and cgroup delegation must be provisioned by the host. Forwarding settings are restored on normal daemon
-shutdown; a forced shutdown can leave host firewall rules or forwarding
-enabled and should be followed by host-level cleanup.
+capabilities and cgroup delegation must be provisioned by the host. The Go
+daemon records its network resources in a root-owned manifest under
+`/run/minidock` and retries cleanup before accepting requests after a forced
+daemon shutdown. A host reboot clears kernel network state. Java also removes
+abandoned per-container directories that have no saved record. If startup
+recovery reports an error, inspect the logged resources before removing the
+ownership manifest by hand.
 
 ## Packages and verification
 
