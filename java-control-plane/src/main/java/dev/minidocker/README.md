@@ -1,7 +1,8 @@
 # Java control plane
 
 The Spring Boot API provides container create/list/get/stop operations under
-`/api/v1/containers` and image staging/list operations under `/api/v1/images`.
+`/api/v1/containers` and image staging/list/delete operations under
+`/api/v1/images`.
 The `bin/minidock` script provides a local CLI for these endpoints.
 
 Image staging accepts existing `.tar` and `.tar.gz` rootfs archives. On run,
@@ -18,6 +19,8 @@ preparing/running records failed or exited.
 Storage paths default to `${user.home}/.local/share/minidock/images` and
 `${user.home}/.local/share/minidock/containers`. Detached container output is
 retained as `container.log` and is available at `GET /api/v1/containers/{id}/logs`.
+Deleting a staged image removes its archive; containers already created from it
+retain their own extracted files.
 Configure the runtime socket with `MINIDOCK_SOCKET` to match the Go daemon. If
 Java and Go run with different home directories, configure the same
 `MINIDOCK_CONTAINERS_DIR` in both processes.
