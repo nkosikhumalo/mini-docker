@@ -67,7 +67,6 @@ public class ContainerService {
 
     public ContainerView create(CreateContainerRequest request) throws IOException {
         ValidatedRequest validated = validate(request);
-        Path archive = images.resolveArchive(validated.image());
         String id = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         String networkIp = validated.network() ? ipAllocator.allocate(id) : "";
         Path containerDirectory = containersDirectory.resolve(id);
@@ -84,7 +83,7 @@ public class ContainerService {
                     PosixFilePermission.OWNER_READ,
                     PosixFilePermission.OWNER_WRITE,
                     PosixFilePermission.OWNER_EXECUTE));
-            extractor.extract(archive, rootfs);
+            images.extract(validated.image(), rootfs, extractor);
             ImageRuntimeConfig imageConfig = readImageRuntimeConfig(rootfs);
             List<String> command = validated.command().isEmpty() ? imageConfig.command() : validated.command();
             if (command.isEmpty()) {
