@@ -27,11 +27,8 @@ public class ImageStore {
         if (image == null || !IMAGE_NAME.matcher(image).matches() || image.equals(".") || image.equals("..")) {
             throw new IllegalArgumentException("image must be a simple local image name");
         }
-        String base = image.endsWith(".tar.gz") ? image.substring(0, image.length() - 7)
-                : image.endsWith(".tar") ? image.substring(0, image.length() - 4) : image;
-        List<Path> candidates = base.equals(image)
-                ? List.of(imagesDirectory.resolve(base + ".tar"), imagesDirectory.resolve(base + ".tar.gz"))
-                : List.of(imagesDirectory.resolve(image));
+        List<Path> candidates = List.of(
+                imagesDirectory.resolve(image + ".tar"), imagesDirectory.resolve(image + ".tar.gz"));
         for (Path candidate : candidates) {
             if (!candidate.normalize().startsWith(imagesDirectory)) {
                 throw new IllegalArgumentException("image path escapes the configured image directory");
@@ -41,6 +38,10 @@ public class ImageStore {
             }
         }
         throw new ImageNotFoundException("image archive not found in " + imagesDirectory + ": " + image);
+    }
+
+    public synchronized void extract(String image, Path destination, RootfsExtractor extractor) throws IOException {
+        extractor.extract(resolveArchive(image), destination);
     }
 
     public synchronized Path registerArchive(String image, Path source) throws IOException {
@@ -92,6 +93,9 @@ public class ImageStore {
                 ? filename.substring(0, filename.length() - 7)
                 : filename.substring(0, filename.length() - 4);
         String alternate = filename.endsWith(".tar.gz") ? base + ".tar" : base + ".tar.gz";
-        Files.deleteIfExists(imagesDirectory.resolve(alternate));
+        Path alternateArchive = imagesDirectory.resolve(alternate);
+        if (Files.isRegularFile(alternateArchive, LinkOption.NOFOLLOW_LINKS)) {
+            Files.delete(alternateArchive);
+        }
     }
 }
