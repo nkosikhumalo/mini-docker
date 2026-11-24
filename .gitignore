@@ -9,3 +9,7 @@
 # Local API credentials and environment overrides
 /.env
 /bin/minidock-ui
+
+# Local-only review notes and test workload
+/issues.md
+/backend/
