@@ -38,6 +38,7 @@ Usage:
   minidock build [--from-dist|--from-jar] -t NAME PROJECT_DIR|IMAGE.tar[.gz]
   minidock ui [API_URL]
   minidock images
+  minidock image rm IMAGE_NAME
   minidock ask "describe the container you want"
   minidock ask-build -t NAME PROJECT_DIR "describe the image to build"
   minidock run [-m MEMORY] [-c CPU] [-p|--port CONTAINER_PORT] [-d|--detach] [--network|--no-network] IMAGE COMMAND [ARG...]
@@ -103,6 +104,17 @@ EOF
     [[ $# -eq 0 ]] || usage
     response=$(curl --fail-with-body -sS "$api/api/v1/images")
     printf '%s' "$response" | ui_render images
+    ;;
+  image)
+    [[ $# -eq 2 && $1 == rm && $2 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || usage
+    image_name=$2
+    read -r -p "Permanently delete staged image '$image_name'? [y/N] " answer
+    [[ $answer == y || $answer == Y || $answer == yes || $answer == YES ]] || {
+      echo 'Cancelled; the image was not deleted.'
+      exit 0
+    }
+    curl --fail-with-body -sS -X DELETE "$api/api/v1/images/$image_name" >/dev/null
+    printf 'Deleted staged image %s. Existing containers retain their extracted files.\n' "$image_name"
     ;;
   ask)
     (($# > 0)) || usage
