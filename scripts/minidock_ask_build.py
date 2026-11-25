@@ -2,6 +2,7 @@
 """Ask OpenRouter to explain a project and rank supported local build recipes."""
 
 import json
+import difflib
 import os
 import re
 import sys
@@ -14,6 +15,8 @@ from pathlib import Path
 from minidock_project import maven_http_port
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_MODEL = "openrouter/free"
+DEFAULT_MAX_TOKENS = 2048
 MAX_PROMPT_LENGTH = 2000
 MAX_RESPONSE_BYTES = 32 * 1024
 MAX_FOLLOW_UPS = 4
@@ -32,6 +35,43 @@ def is_executable_jar(path):
 def fail(message):
     print(f"minidock ask-build: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def configured_model(model=None, variable="OPENROUTER_HEAVY_MODEL"):
+    selected = (model or os.environ.get(variable) or os.environ.get("OPENROUTER_MODEL") or DEFAULT_MODEL).strip()
+    if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{1,127}(?::[A-Za-z0-9._-]+)?", selected)
+            or selected.casefold() in {"auto", "openrouter/auto"}):
+        raise ValueError(f"{variable} must contain a valid explicit OpenRouter model ID; openrouter/auto is disabled")
+    return selected
+
+
+def configured_max_tokens():
+    raw = os.environ.get("OPENROUTER_MAX_TOKENS", str(DEFAULT_MAX_TOKENS)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError("OPENROUTER_MAX_TOKENS must be an integer from 1 to 8192") from None
+    if not 1 <= value <= 8192:
+        raise ValueError("OPENROUTER_MAX_TOKENS must be an integer from 1 to 8192")
+    return value
+
+
+def payment_error(error):
+    try:
+        payload = json.loads(error.read(4096))
+        detail = payload.get("error", {}).get("message", "")
+        metadata = payload.get("error", {}).get("metadata", {})
+        reason = metadata.get("reason", "") if isinstance(metadata, dict) else ""
+    except (ValueError, AttributeError, TypeError):
+        detail, reason = "", ""
+    if reason == "in_flight_budget_exhausted":
+        return "OpenRouter temporarily exhausted this key's concurrent request budget (HTTP 402). Wait briefly, then retry."
+    if error.code == 402:
+        suffix = f" OpenRouter said: {detail[:300]}" if detail else ""
+        return ("OpenRouter returned HTTP 402: the key may have a spending limit or the account may need credits. "
+                "Check the key limit and account credits. MiniDock is configured for the free model router, "
+                "but account/key restrictions can still reject requests." + suffix)
+    return f"OpenRouter returned HTTP {error.code}" + (f": {detail[:300]}" if detail else "")
 
 
 def inspect_project(project):
@@ -178,7 +218,32 @@ def project_selected_by_reply(suggestions, reply):
         name = path.rsplit("/", 1)[-1]
         if text in {path, name} or re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])", text):
             matches.append(suggestion)
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        return None
+
+    # Users often answer the folder question with a small typo. Accept only a
+    # very close, clearly best match so a typo does not send a build to a
+    # different project in a multi-project workspace.
+    tokens = re.findall(r"[a-z0-9]+", text)
+    candidates = set(tokens)
+    candidates.add("".join(tokens))
+    candidates.update(tokens[index] + tokens[index + 1] for index in range(len(tokens) - 1))
+    ranked = []
+    for suggestion in suggestions:
+        path = suggestion.rstrip("/").casefold()
+        name = path.rsplit("/", 1)[-1]
+        normalized = re.sub(r"[^a-z0-9]", "", name)
+        score = max((difflib.SequenceMatcher(None, candidate, normalized).ratio()
+                     for candidate in candidates if candidate), default=0.0)
+        ranked.append((score, suggestion))
+    ranked.sort(reverse=True)
+    if not ranked or ranked[0][0] < 0.82:
+        return None
+    if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.08:
+        return None
+    return ranked[0][1]
 
 
 OPTION_DETAILS = {
@@ -279,9 +344,9 @@ def request_turn(messages, image_name, profile, project_dir, api_key, model=None
     chat_messages = [dict(message) for message in messages]
     chat_messages[0]["content"] = "MiniDock project profile: " + context + "\n\nUser: " + chat_messages[0]["content"]
     body = json.dumps({
-        "model": model or "openrouter/auto",
+        "model": configured_model(model),
         "temperature": 0,
-        "max_tokens": 384,
+        "max_tokens": configured_max_tokens(),
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": system},
@@ -298,11 +363,7 @@ def request_turn(messages, image_name, profile, project_dir, api_key, model=None
         with opener(request, timeout=45) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
-        try:
-            detail = json.loads(error.read(4096)).get("error", {}).get("message", "")
-        except (ValueError, AttributeError):
-            detail = ""
-        raise RuntimeError(f"OpenRouter returned HTTP {error.code}" + (f": {detail[:300]}" if detail else "")) from None
+        raise RuntimeError(payment_error(error)) from None
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         reason = error.reason if isinstance(error, urllib.error.URLError) else error
         raise RuntimeError(f"could not contact OpenRouter: {reason}") from None
@@ -415,6 +476,7 @@ def main():
                 fail("chat messages must alternate user and assistant text and stay within 2000 characters")
         if messages[-1]["role"] != "user":
             fail("the last chat message must be from the user")
+        selected_project = None
         try:
             profile = inspect_project(project)
             project_dir = project
@@ -441,6 +503,7 @@ def main():
                     }, separators=(",", ":")))
                     return
             else:
+                selected_project = selected
                 project_dir = (project / selected).resolve()
                 try:
                     profile = inspect_project(project_dir)
@@ -454,6 +517,26 @@ def main():
             if not image_name:
                 image_name = "minidock-image"
         last_message = messages[-1]["content"]
+        folder_question_was_asked = any(
+            message.get("role") == "assistant"
+            and "which one would you like to build" in message.get("content", "").casefold()
+            for message in messages[:-1]
+        )
+        if selected_project and folder_question_was_asked:
+            builder_names = {
+                "vite-static": "a Vite frontend",
+                "go-binary": "a Go application",
+                "maven-java": "a Maven Java application",
+            }
+            summary = (f"I found {builder_names.get(profile['detected_builder'], 'a supported app')} in "
+                       f"{selected_project}. Choose a local build option below to create the image.")
+            plan = validate_plan({
+                "kind": "plan",
+                "summary": summary,
+                "recommended_order": profile["available_options"],
+            }, profile, image_name, project_dir.as_posix())
+            print(json.dumps(plan, separators=(",", ":")))
+            return
         known_command = profile.get("run_command")
         if (staged_images and known_command and image_name in staged_images
                 and re.search(r"\b(run|start|launch|execute)\b", last_message, re.IGNORECASE)):
@@ -470,7 +553,7 @@ def main():
             fail("OPENROUTER_API_KEY is missing; add it to the repository .env file or export it in your shell")
         try:
             answer = request_turn(messages, image_name, profile, project_dir.as_posix(), api_key,
-                                  os.environ.get("OPENROUTER_MODEL"), staged_images=staged_images)
+                                  os.environ.get("OPENROUTER_HEAVY_MODEL"), staged_images=staged_images)
         except (RuntimeError, ValueError) as error:
             fail(str(error))
         if answer["kind"] != "plan" and len(messages) >= 9:
@@ -500,7 +583,7 @@ def main():
     if not api_key:
         fail("OPENROUTER_API_KEY is missing; add it to the repository .env file or export it in your shell")
     try:
-        plan = request_plan(prompt, image_name, profile, project.as_posix(), api_key, os.environ.get("OPENROUTER_MODEL"))
+        plan = request_plan(prompt, image_name, profile, project.as_posix(), api_key, os.environ.get("OPENROUTER_HEAVY_MODEL"))
     except (RuntimeError, ValueError) as error:
         fail(str(error))
     print(json.dumps(plan, separators=(",", ":")))
