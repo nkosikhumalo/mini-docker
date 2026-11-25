@@ -85,6 +85,8 @@ type aiTurnMsg struct {
 	err   error
 }
 
+type aiThinkingTickMsg struct{}
+
 type aiBuildMsg struct {
 	path string
 	err  error
@@ -140,6 +142,7 @@ type appModel struct {
 	aiImageName        string
 	aiSelected         int
 	aiPending          bool
+	aiThinkingFrame    int
 	aiConfirm          bool
 	aiRunConfirm       bool
 	buildSession       *buildSession
@@ -263,10 +266,9 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.err != nil {
 			m.errText = message.err.Error()
 			if len(m.aiMessages) > 0 && m.aiMessages[len(m.aiMessages)-1].role == "user" {
-				last := m.aiMessages[len(m.aiMessages)-1]
-				m.aiFields[1] = last.content
-				m.aiMessages = m.aiMessages[:len(m.aiMessages)-1]
+				m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "I couldn't get a response from OpenRouter. Your message is still in the chat; check the error above, then send another message when ready."})
 			}
+			m.aiFocus = 1
 			return m, nil
 		}
 		m.errText = ""
@@ -291,6 +293,11 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "I found a staged image and a startup command. Review the launch details below."})
 			m.aiRunConfirm = true
 			m.aiFocus = 0
+		}
+	case aiThinkingTickMsg:
+		if m.aiPending {
+			m.aiThinkingFrame++
+			return m, tickAIThinking()
 		}
 	case aiBuildMsg:
 		m.busy, m.aiConfirm = false, false
@@ -636,6 +643,28 @@ func isStagedImageJSON(line string) bool {
 	return json.Unmarshal([]byte(line), &result) == nil && result["path"] != nil
 }
 
+func buildProgressPhase(logs []string) string {
+	output := strings.ToLower(strings.Join(logs, "\n"))
+	switch {
+	case strings.Contains(output, "image archive created"):
+		return "Staging the built image in MiniDock"
+	case strings.Contains(output, "npm run build") || strings.Contains(output, "vite build"):
+		return "Building frontend assets"
+	case strings.Contains(output, "downloading a verified runtime") || strings.Contains(output, "selected node.js"):
+		return "Preparing a compatible Node.js runtime"
+	case strings.Contains(output, "jlink"):
+		return "Preparing the bundled Java runtime"
+	case strings.Contains(output, "mvnw") || strings.Contains(output, "maven"):
+		return "Building the Java application"
+	case strings.Contains(output, "go build"):
+		return "Compiling the Go application"
+	case len(logs) == 0:
+		return "Preparing project and build tools"
+	default:
+		return "Running the selected project build"
+	}
+}
+
 func (m appModel) handleAIBuildKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.busy && !m.aiPending {
 		return m, nil
@@ -738,7 +767,7 @@ func (m appModel) submitAIChat() (tea.Model, tea.Cmd) {
 	m.aiFields[1] = ""
 	m.aiMessages = append(m.aiMessages, chatMessage{role: "user", content: message})
 	m.aiPlan, m.aiRunPlan, m.errText = nil, nil, ""
-	m.aiPending, m.busy = true, true
+	m.aiPending, m.busy, m.aiThinkingFrame = true, true, 0
 	return m, m.requestAITurn()
 }
 
@@ -767,7 +796,7 @@ func (m appModel) requestAITurn() tea.Cmd {
 	command.Env = replaceEnv(os.Environ(), "MINIDOCK_API_URL", m.apiURL)
 	command.Env = replaceEnv(command.Env, "MINIDOCK_REPO", repository)
 	command.Stdin = bytes.NewReader(payload)
-	return func() tea.Msg {
+	request := func() tea.Msg {
 		var stderr bytes.Buffer
 		command.Stderr = &stderr
 		output, err := command.Output()
@@ -792,6 +821,11 @@ func (m appModel) requestAITurn() tea.Cmd {
 		}
 		return aiTurnMsg{err: errors.New("AI returned an empty response or unsupported build plan")}
 	}
+	return tea.Batch(request, tickAIThinking())
+}
+
+func tickAIThinking() tea.Cmd {
+	return tea.Tick(110*time.Millisecond, func(time.Time) tea.Msg { return aiThinkingTickMsg{} })
 }
 
 func (m appModel) buildAIImage() tea.Cmd {
@@ -1204,7 +1238,9 @@ func (m appModel) View() string {
 			input = "Write a message…"
 		}
 		if m.aiPending {
-			input = "MiniDock AI is thinking…"
+			frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+			frame := frames[m.aiThinkingFrame%len(frames)]
+			input = frame + " OpenRouter is processing your message…"
 		}
 		composerStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(composerColor).Padding(0, 1).Width(chatWidth)
 		out.WriteString(composerStyle.Render(composerMarker+"› "+input) + "\n")
@@ -1243,7 +1279,7 @@ func (m appModel) View() string {
 			frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 			frame := frames[(time.Now().UnixMilli()/120)%int64(len(frames))]
 			out.WriteString(infoStyle.Render("  "+frame+" Building image "+m.aiImageName+"…") + "\n")
-			out.WriteString(mutedStyle.Render("  Live build output") + "\n\n")
+			out.WriteString(mutedStyle.Render("  "+buildProgressPhase(m.buildLogs)+" · live build output") + "\n\n")
 		} else if m.buildErr != "" {
 			out.WriteString(badStyle.Render("  ✗ Image build failed") + "\n")
 			out.WriteString(badStyle.Render("  "+clean(m.buildErr)) + "\n\n")
