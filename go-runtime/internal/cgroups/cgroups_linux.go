@@ -14,6 +14,7 @@ type Limits struct {
 	MemoryMax uint64
 	CPUQuota  uint64
 	CPUPeriod uint64
+	PidsMax   uint64
 }
 
 // Attach creates one cgroup v2 group, writes its limits, and moves pid into it.
@@ -25,7 +26,7 @@ func Attach(root, id string, limits Limits, pid int) (func() error, error) {
 	if limits.CPUQuota == 0 != (limits.CPUPeriod == 0) {
 		return nil, errors.New("cpu quota and period must be specified together")
 	}
-	if limits.MemoryMax == 0 && limits.CPUQuota == 0 {
+	if limits.MemoryMax == 0 && limits.CPUQuota == 0 && limits.PidsMax == 0 {
 		return func() error { return nil }, nil
 	}
 	group, cleanup, err := CreateGroup(root, id)
@@ -140,6 +141,11 @@ func WriteLimits(group string, limits Limits, pid int) error {
 		}
 		value := fmt.Sprintf("%d %d", limits.CPUQuota, limits.CPUPeriod)
 		if err := writeControl(filepath.Join(group, "cpu.max"), value); err != nil {
+			return err
+		}
+	}
+	if limits.PidsMax > 0 {
+		if err := writeControl(filepath.Join(group, "pids.max"), fmt.Sprint(limits.PidsMax)); err != nil {
 			return err
 		}
 	}
