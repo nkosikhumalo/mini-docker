@@ -9,6 +9,8 @@ import urllib.error
 import urllib.request
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_MODEL = "openrouter/free"
+DEFAULT_MAX_TOKENS = 2048
 MAX_PROMPT_LENGTH = 2000
 MAX_RESPONSE_BYTES = 64 * 1024
 
@@ -16,6 +18,44 @@ MAX_RESPONSE_BYTES = 64 * 1024
 def fail(message):
     print(f"minidock ask: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def configured_model(model=None, variable="OPENROUTER_FAST_MODEL"):
+    selected = (model or os.environ.get(variable) or os.environ.get("OPENROUTER_MODEL") or DEFAULT_MODEL).strip()
+    if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{1,127}(?::[A-Za-z0-9._-]+)?", selected)
+            or selected.casefold() in {"auto", "openrouter/auto"}
+            ):
+        raise ValueError(f"{variable} must contain a valid explicit OpenRouter model ID; openrouter/auto is disabled")
+    return selected
+
+
+def configured_max_tokens():
+    raw = os.environ.get("OPENROUTER_MAX_TOKENS", str(DEFAULT_MAX_TOKENS)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError("OPENROUTER_MAX_TOKENS must be an integer from 1 to 8192") from None
+    if not 1 <= value <= 8192:
+        raise ValueError("OPENROUTER_MAX_TOKENS must be an integer from 1 to 8192")
+    return value
+
+
+def payment_error(error):
+    try:
+        payload = json.loads(error.read(4096))
+        detail = payload.get("error", {}).get("message", "")
+        metadata = payload.get("error", {}).get("metadata", {})
+        reason = metadata.get("reason", "") if isinstance(metadata, dict) else ""
+    except (ValueError, AttributeError, TypeError):
+        detail, reason = "", ""
+    if reason == "in_flight_budget_exhausted":
+        return "OpenRouter temporarily exhausted this key's concurrent request budget (HTTP 402). Wait briefly, then retry."
+    if error.code == 402:
+        suffix = f" OpenRouter said: {detail[:300]}" if detail else ""
+        return ("OpenRouter returned HTTP 402: the key may have a spending limit or the account may need credits. "
+                "Check the key limit and account credits. MiniDock is configured for the free model router, "
+                "but account/key restrictions can still reject requests." + suffix)
+    return f"OpenRouter returned HTTP {error.code}" + (f": {detail[:300]}" if detail else "")
 
 
 def validate_spec(value, available_images):
@@ -70,9 +110,9 @@ def request_spec(prompt, available_images, api_key, model=None, opener=urllib.re
     )
     user = json.dumps({"request": prompt, "staged_images": available_images}, ensure_ascii=False)
     body = json.dumps({
-        "model": model or "openrouter/auto",
+        "model": configured_model(model),
         "temperature": 0,
-        "max_tokens": 256,
+        "max_tokens": configured_max_tokens(),
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": system},
@@ -89,11 +129,7 @@ def request_spec(prompt, available_images, api_key, model=None, opener=urllib.re
         with opener(request, timeout=45) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
-        try:
-            detail = json.loads(error.read(4096)).get("error", {}).get("message", "")
-        except (ValueError, AttributeError):
-            detail = ""
-        raise RuntimeError(f"OpenRouter returned HTTP {error.code}" + (f": {detail[:300]}" if detail else "")) from None
+        raise RuntimeError(payment_error(error)) from None
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         raise RuntimeError(f"could not contact OpenRouter: {error.reason if isinstance(error, urllib.error.URLError) else error}") from None
 
@@ -127,7 +163,7 @@ def main():
     if not api_key:
         fail("OPENROUTER_API_KEY is missing; add it to the repository .env file or export it in your shell")
     try:
-        spec = request_spec(prompt, available_images, api_key, os.environ.get("OPENROUTER_MODEL"))
+        spec = request_spec(prompt, available_images, api_key, os.environ.get("OPENROUTER_FAST_MODEL"))
     except (RuntimeError, ValueError) as error:
         fail(str(error))
     print(json.dumps(spec, separators=(",", ":")))
