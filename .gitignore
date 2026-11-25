@@ -5,7 +5,7 @@
 # Maven output and the project-local Maven distribution downloaded by mvnw
 /java-control-plane/target/
 /java-control-plane/.mvn/wrapper/apache-maven-*
-
+/companion-frontend/
 # Local API credentials and environment overrides
 /.env
 /bin/minidock-ui
