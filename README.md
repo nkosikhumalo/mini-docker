@@ -129,8 +129,14 @@ features. For development, install:
 - Go (the version selected by `go-runtime/go.mod`).
 - Java 21 and the repository's Maven wrapper.
 - `make`, Python 3, `curl`, and `sudo` for the root `run.sh` workflow.
-- For Vite builds: compatible Node.js and npm, plus Go for the small static
-  server packaged with the site.
+- For Vite builds: Go for the small static server packaged with the site.
+  MiniDock reads the Node.js requirements from Vite's installed or locked
+  package metadata and the project's `engines.node` field. It uses a matching
+  local Node.js when available, or downloads and SHA-256 verifies a compatible
+  official Linux runtime and its bundled npm into the user's cache. Set
+  `MINIDOCK_NODE_BIN` or `MINIDOCK_NODE_CACHE` to override those paths. Automatic
+  downloads support Linux x64 and arm64; other architectures need a compatible
+  local Node.js.
 - For Go builds: the Go toolchain and module dependencies.
 - For Maven builds: Maven or `mvnw`, a JDK with `jlink`, and project
   dependencies.
