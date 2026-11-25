@@ -105,6 +105,7 @@ public class ContainerService {
                     validated.memoryMax(),
                     validated.cpuQuota(),
                     validated.cpuPeriod(),
+                    validated.pidsMax(),
                     validated.network(),
                     networkIp,
                     validated.attach(),
@@ -382,6 +383,7 @@ public class ContainerService {
         if (tty && !suppliedEnvironment.containsKey("TERM")) environment.add("TERM=xterm-256color");
         long memoryMax = parseMemory(request.memoryLimit());
         long cpuQuota = parseCPUQuota(request.cpuLimit());
+        long pidsMax = parsePidsLimit(request.pidsLimit());
         Integer containerPort = request.containerPort();
         if (containerPort != null && (containerPort < 1 || containerPort > 65535)) {
             throw new IllegalArgumentException("container_port must be between 1 and 65535");
@@ -391,8 +393,14 @@ public class ContainerService {
             throw new IllegalArgumentException("port publishing requires container networking");
         }
         return new ValidatedRequest(request.image(), List.copyOf(requestedCommand), List.copyOf(environment),
-                request.hostname(), memoryMax, cpuQuota, cpuQuota == 0 ? 0 : CPU_PERIOD,
+                request.hostname(), memoryMax, cpuQuota, cpuQuota == 0 ? 0 : CPU_PERIOD, pidsMax,
                 network, attach, tty, containerPort);
+    }
+
+    private static long parsePidsLimit(Integer value) {
+        if (value == null) return 0;
+        if (value < 1) throw new IllegalArgumentException("pids_limit must be a positive process count");
+        return value.longValue();
     }
 
     private static ImageRuntimeConfig readImageRuntimeConfig(Path rootfs) throws IOException {
@@ -496,6 +504,6 @@ public class ContainerService {
     }
 
     private record ValidatedRequest(String image, List<String> command, List<String> environment,
-                                    String hostname, long memoryMax, long cpuQuota, long cpuPeriod,
+                                    String hostname, long memoryMax, long cpuQuota, long cpuPeriod, long pidsMax,
                                     boolean network, boolean attach, boolean tty, Integer containerPort) {}
 }
