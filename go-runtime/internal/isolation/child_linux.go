@@ -262,7 +262,7 @@ func defaultContainerRoot() string {
 // AttachCgroup applies requested resource limits in cgroups v2. With no
 // limits, it avoids creating an unnecessary group.
 func (starter ChildStarter) AttachCgroup(_ context.Context, cfg container.Config, pid int) (func() error, error) {
-	if cfg.MemoryMax != 0 || cfg.CPUQuota != 0 {
+	if cfg.MemoryMax != 0 || cfg.CPUQuota != 0 || cfg.PidsMax != 0 {
 		root := starter.CgroupRoot
 		if root == "" {
 			root = os.Getenv("MINIDOCK_CGROUP_ROOT")
@@ -270,7 +270,7 @@ func (starter ChildStarter) AttachCgroup(_ context.Context, cfg container.Config
 		if root == "" {
 			root = "/sys/fs/cgroup/minidock"
 		}
-		return cgroups.Attach(root, cfg.ID, cgroups.Limits{MemoryMax: cfg.MemoryMax, CPUQuota: cfg.CPUQuota, CPUPeriod: cfg.CPUPeriod}, pid)
+		return cgroups.Attach(root, cfg.ID, cgroups.Limits{MemoryMax: cfg.MemoryMax, CPUQuota: cfg.CPUQuota, CPUPeriod: cfg.CPUPeriod, PidsMax: cfg.PidsMax}, pid)
 	}
 	return nil, nil
 }
