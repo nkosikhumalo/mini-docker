@@ -36,10 +36,10 @@ func logHostPreflight() {
 	}
 	controllers, err := os.ReadFile("/sys/fs/cgroup/cgroup.controllers")
 	if err != nil {
-		log.Printf("host preflight: cgroups v2 not detected at /sys/fs/cgroup/cgroup.controllers; CPU/memory limits will be unavailable: %v", err)
+		log.Printf("host preflight: cgroups v2 not detected at /sys/fs/cgroup/cgroup.controllers; CPU, memory, and process-count limits will be unavailable: %v", err)
 	} else {
 		available := " " + strings.TrimSpace(string(controllers)) + " "
-		for _, controller := range []string{"cpu", "memory"} {
+		for _, controller := range []string{"cpu", "memory", "pids"} {
 			if !strings.Contains(available, " "+controller+" ") {
 				log.Printf("host preflight: cgroups v2 controller %q is unavailable; requests using that limit will fail", controller)
 			}
