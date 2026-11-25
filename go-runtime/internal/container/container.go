@@ -22,6 +22,7 @@ type Config struct {
 	MemoryMax uint64   `json:"memory_max,omitempty"`
 	CPUQuota  uint64   `json:"cpu_quota,omitempty"`
 	CPUPeriod uint64   `json:"cpu_period,omitempty"`
+	PidsMax   uint64   `json:"pids_max,omitempty"`
 	Network   bool     `json:"network,omitempty"`
 	NetworkIP string   `json:"network_ip,omitempty"`
 	Attach    bool     `json:"attach,omitempty"`
