@@ -25,8 +25,9 @@ the socket server exits.
    and IPC namespaces. A parent-death signal stops the namespace init if the
    daemon unexpectedly exits. The parent holds the child while applying
    cgroups and optional networking.
-3. `cgroups` writes requested memory/CPU controls and registers the child PID.
-   Configure a delegated cgroups v2 subtree with `MINIDOCK_CGROUP_ROOT`.
+3. `cgroups` writes requested memory/CPU/process-count controls and registers
+   the child PID. Configure a delegated cgroups v2 subtree with
+   `MINIDOCK_CGROUP_ROOT`; process limits require the `pids` controller.
 4. `network` creates `minidock0` at `10.0.0.1/24`, assigns a container IP,
    attaches a veth, and configures the container default route. This requires
    `ip`, `nsenter`, `iptables`, `CAP_NET_ADMIN`, and permission to change IPv4
