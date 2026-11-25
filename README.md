@@ -136,8 +136,8 @@ features. For development, install:
   dependencies.
 - For container networking: `iproute2`, `nsenter`, `iptables`, and permission
   to configure bridge/veth networking.
-- For CPU or memory limits: a **writable delegated cgroups v2 subtree** with
-  the needed controllers enabled.
+- For CPU, memory, or process-count limits: a **writable delegated cgroups v2
+  subtree** with the requested controllers enabled (`cpu`, `memory`, or `pids`).
 - For AI calls: an OpenRouter API key. AI is optional; local building and
   running do not inherently need a model key.
 
@@ -579,12 +579,14 @@ and moves the host PID into it. For example:
 ```text
 memory.max = 268435456
 cpu.max    = 50000 100000
+pids.max   = 128
 cgroup.procs = <host pid>
 ```
 
 The first line caps memory at 256 MiB. The CPU line permits half of one CPU
 over a 100 ms period. The host must delegate a writable subtree; seeing
-controller names alone is not sufficient.
+controller names alone is not sufficient. `pids.max` limits the number of
+processes (including threads) in the container's cgroup.
 
 ### User namespaces and host identity
 
@@ -669,6 +671,7 @@ execute it. Request a small structured plan instead:
   "command": ["/usr/bin/minidock-web", "--listen", "0.0.0.0:8080"],
   "memory_limit": "128M",
   "cpu_limit": null,
+  "pids_limit": 128,
   "network": true
 }
 ```
@@ -839,13 +842,16 @@ bin/minidock rm CONTAINER_ID        # delete a finished container permanently
 Manual start syntax:
 
 ```sh
-bin/minidock run [-m MEMORY] [-c CPU] [-p CONTAINER_PORT] \
+bin/minidock run [-m MEMORY] [-c CPU] [--pids LIMIT] [-p CONTAINER_PORT] \
   [-d|--detach] [--network|--no-network] IMAGE COMMAND [ARG...]
 ```
 
 Use the dashboard to launch an image using embedded startup metadata. Use CLI
 `run` when you need to supply the command directly. Attached runs connect
 terminal input/output; `-d` runs in the background and writes bounded logs.
+Set `--pids 128` to cap the container at 128 processes and threads. The default
+is no process-count limit; the host must enable and delegate the cgroups v2
+`pids` controller for this option.
 
 ### Verification without risking the host
 
