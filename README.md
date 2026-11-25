@@ -870,6 +870,19 @@ Use a disposable Linux host and configure the delegated subtree before
 running it; do not paste a placeholder path. A successful run verifies only
 the exercised host and kernel policy.
 
+To verify recovery after a forced daemon termination without the cgroup setup,
+run:
+
+```sh
+sudo make e2e-recovery
+```
+
+This focused check temporarily creates MiniDock's bridge, veth, and firewall
+rules, kills their owning helper process with `SIGKILL`, then verifies startup
+recovery removes the recorded resources and restores IPv4 forwarding. It also
+refuses to run if `minidock0` or MiniDock's subnet is already in use. Use a
+disposable Linux host.
+
 ### Data locations and environment
 
 Defaults are beneath `~/.local/share/minidock/`:
