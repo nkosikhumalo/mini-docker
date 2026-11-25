@@ -5,7 +5,7 @@ SUDO ?= sudo
 GO_BIN ?= $(shell command -v go || { test ! -x /usr/local/go/bin/go || echo /usr/local/go/bin/go; })
 MAVEN_ARGS ?=
 
-.PHONY: build build-go build-java test test-go test-java test-ask test-integration e2e run-go run-java clean
+.PHONY: build build-go build-java test test-go test-java test-ask test-integration e2e e2e-recovery run-go run-java clean
 
 build: build-go build-java
 
@@ -38,6 +38,10 @@ test-integration:
 # Real namespaces, mounts, cgroups, veth, and firewall setup on a disposable host.
 e2e:
 	$(SUDO) -E env MINIDOCK_GO_BIN=$(GO_BIN) ./scripts/run-e2e.sh
+
+# Real host network recovery after killing its resource-owning process with SIGKILL.
+e2e-recovery:
+	$(SUDO) -E env MINIDOCK_GO_BIN=$(GO_BIN) ./scripts/run-recovery-e2e.sh
 
 run-go: build-go
 	./bin/minidockd
