@@ -507,7 +507,7 @@ func (s *runtimeServer) shutdown() {
 }
 
 func configFromRequest(request *runtimev1.RunRequest) container.Config {
-	return container.Config{ID: request.GetId(), RootFS: request.GetRootfs(), Command: request.GetCommand(), Env: request.GetEnv(), Hostname: request.GetHostname(), MemoryMax: request.GetMemoryMax(), CPUQuota: request.GetCpuQuota(), CPUPeriod: request.GetCpuPeriod(), Network: request.GetNetwork(), NetworkIP: request.GetNetworkIp(), Attach: request.GetAttach(), TTY: request.GetTty(), LogPath: request.GetLogPath()}
+	return container.Config{ID: request.GetId(), RootFS: request.GetRootfs(), Command: request.GetCommand(), Env: request.GetEnv(), Hostname: request.GetHostname(), MemoryMax: request.GetMemoryMax(), CPUQuota: request.GetCpuQuota(), CPUPeriod: request.GetCpuPeriod(), PidsMax: request.GetPidsMax(), Network: request.GetNetwork(), NetworkIP: request.GetNetworkIp(), Attach: request.GetAttach(), TTY: request.GetTty(), LogPath: request.GetLogPath()}
 }
 
 func responseForError(ctx context.Context, err error) (*runtimev1.RunResponse, error) {
