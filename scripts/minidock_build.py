@@ -288,8 +288,8 @@ def download_node(requirements):
                     member = bundle.getmember(node_member)
                 except KeyError:
                     fail("verified Node.js archive did not contain its expected node executable")
-                if not member.isfile() or member.size > 100 << 20:
-                    fail("Node.js archive contained an invalid node executable")
+                if not member.isfile() or member.size > 256 << 20:
+                    fail(f"verified Node.js archive contained an invalid or unexpectedly large node executable ({member.size // (1 << 20)} MiB)")
                 source = bundle.extractfile(member)
                 if source is None:
                     fail("could not read the node executable from the verified archive")
