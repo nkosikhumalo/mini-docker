@@ -708,15 +708,32 @@ Keep the key out of source control and image contents. This repository's
 values already exported in the shell:
 
 ```dotenv
-OPENROUTER_API_KEY=your_key_here
-OPENROUTER_MODEL=openrouter/auto
+OPENROUTER_API_KEY=
+OPENROUTER_FAST_MODEL=openrouter/free
+OPENROUTER_HEAVY_MODEL=openrouter/free
+OPENROUTER_MAX_TOKENS=2048
 ```
 
-Ignore `.env` in Git and restrict its permissions:
+`ask` uses the fast model setting; the AI project chat uses the heavy model
+setting. Both default to OpenRouter's free-model router. `OPENROUTER_MAX_TOKENS`
+sets the response cap for both calls and must be between 1 and 8192. You can
+choose separate models by changing the fast and heavy model IDs. MiniDock
+rejects `openrouter/auto` so requests don't silently switch models.
+
+If `.env` does not exist, copy the example and add your key. If it already
+exists, add or update these variables without replacing your existing key.
+Then restrict the file permissions:
 
 ```sh
+cp .env.example .env
 chmod 600 .env
 ```
+
+OpenRouter can return HTTP 402 when account credits are unavailable, a key
+spending limit is reached, or the account's concurrent request budget is
+exhausted. Free-model routing avoids model token charges, but an account or key
+restriction can still prevent a request. MiniDock reports these causes
+separately where OpenRouter includes that detail.
 
 AI requests leave the machine to reach OpenRouter. Don't include passwords,
 tokens, private environment values, or confidential source in prompts. The
