@@ -75,8 +75,39 @@ for tool in go java curl make sudo; do
   command -v "$tool" >/dev/null || { echo "Required command '$tool' was not found on PATH." >&2; exit 1; }
 done
 if [[ -S $socket_path ]]; then
-  echo "Runtime socket already exists at $socket_path; stop the other daemon or remove the stale socket first." >&2
-  exit 1
+  socket_state=$(python3 - "$socket_path" <<'PY'
+import errno
+import socket
+import sys
+
+connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    connection.connect(sys.argv[1])
+except OSError as error:
+    if error.errno in (errno.ECONNREFUSED, errno.ENOENT):
+        print("stale")
+    else:
+        print("unknown")
+else:
+    print("active")
+finally:
+    connection.close()
+PY
+)
+  case $socket_state in
+    active)
+      echo "MiniDock runtime is already listening on $socket_path; stop that instance or choose another MINIDOCK_SOCKET." >&2
+      exit 1
+      ;;
+    stale)
+      echo "Removing stale MiniDock runtime socket at $socket_path."
+      sudo rm -f -- "$socket_path"
+      ;;
+    *)
+      echo "Could not safely determine whether $socket_path is active; leaving it untouched." >&2
+      exit 1
+      ;;
+  esac
 fi
 if curl --noproxy '*' --max-time 1 -fsS "$api_url/api/v1/images" >/dev/null 2>&1; then
   echo "A service is already responding at $api_url; choose another MINIDOCK_API_PORT." >&2
