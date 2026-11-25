@@ -57,6 +57,7 @@ public class GoRuntimeGateway implements RuntimeGateway {
                 .setMemoryMax(config.memoryMax())
                 .setCpuQuota(config.cpuQuota())
                 .setCpuPeriod(config.cpuPeriod())
+                .setPidsMax(config.pidsMax())
                 .setNetwork(config.network())
                 .setNetworkIp(config.networkIp())
                 .setAttach(config.attach())
