@@ -49,12 +49,12 @@ class AskTests(unittest.TestCase):
             observed["timeout"] = timeout
             return FakeResponse(completion(self.spec))
 
-        result = minidock_ask.request_spec("say hi", ["alpine-local"], "dummy", opener=opener)
+        result = minidock_ask.request_spec("say hi", ["alpine-local"], "dummy", model="openrouter/free", opener=opener)
         self.assertEqual(self.spec, result)
         self.assertEqual(minidock_ask.ENDPOINT, observed["url"])
         self.assertEqual("Bearer dummy", observed["headers"]["Authorization"])
         self.assertEqual({"type": "json_object"}, observed["body"]["response_format"])
-        self.assertEqual("openrouter/auto", observed["body"]["model"])
+        self.assertEqual("openrouter/free", observed["body"]["model"])
         self.assertIn('"staged_images": ["alpine-local"]', observed["body"]["messages"][1]["content"])
         self.assertEqual(45, observed["timeout"])
 
