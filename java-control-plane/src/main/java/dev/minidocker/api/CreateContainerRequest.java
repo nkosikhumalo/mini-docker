@@ -10,6 +10,7 @@ public record CreateContainerRequest(
         List<String> command,
         @JsonProperty("memory_limit") String memoryLimit,
         @JsonProperty("cpu_limit") String cpuLimit,
+        @JsonProperty("pids_limit") Integer pidsLimit,
         @JsonProperty("container_port") Integer containerPort,
         Map<String, String> environment,
         String hostname,
