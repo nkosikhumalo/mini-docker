@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Build supported frontend source projects into MiniDock rootfs archives."""
 
+import glob
+import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
-import zipfile
 import tarfile
+import zipfile
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import PurePosixPath
 from pathlib import Path
 from minidock_project import maven_http_port
@@ -30,20 +35,324 @@ def run(command, cwd, env=None):
         fail(f"command failed with exit code {error.returncode}: {command[0]}")
 
 
-def node_version():
-    binary = shutil.which("node")
-    if binary is None:
-        fail("Vite builds require Node.js 20.19+ or 22.12+; install a supported Node.js version")
+NODE_DIST = "https://nodejs.org/dist"
+
+
+def read_node_version(binary):
     try:
         output = subprocess.check_output([binary, "--version"], text=True, stderr=subprocess.DEVNULL).strip()
-    except subprocess.CalledProcessError:
-        fail("could not read the installed Node.js version")
+    except (OSError, subprocess.CalledProcessError):
+        return None
     match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", output)
-    if match is None:
-        fail(f"could not parse Node.js version {output!r}")
-    major, minor, patch = map(int, match.groups())
-    if not (major == 20 and (minor, patch) >= (19, 0) or major == 22 and (minor, patch) >= (12, 0) or major > 22):
-        fail(f"installed Node.js is {output}; Vite 8 requires 20.19+ or 22.12+")
+    return tuple(map(int, match.groups())) if match else None
+
+
+def version_satisfies(version, engine_range):
+    """Evaluate the common npm semver ranges used in package engine fields."""
+    def partial(value):
+        match = re.fullmatch(r"v?(\d+|[xX*])(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?", value)
+        if not match:
+            return None
+        raw = match.groups()
+        numbers = []
+        wildcard_at = 3
+        for index, item in enumerate(raw):
+            if item is None or item in ("x", "X", "*"):
+                wildcard_at = min(wildcard_at, index)
+                numbers.append(0)
+            elif wildcard_at < 3:
+                return None
+            else:
+                numbers.append(int(item))
+        return tuple(numbers), wildcard_at
+
+    def upper_partial(nums, precision):
+        if precision == 0:
+            return None
+        if precision == 1:
+            return nums[0] + 1, 0, 0
+        return nums[0], nums[1] + 1, 0
+
+    for alternative in engine_range.strip().split("||"):
+        alternative = alternative.strip()
+        hyphen = re.fullmatch(r"(\S+)\s+-\s+(\S+)", alternative)
+        if hyphen:
+            right = partial(hyphen.group(2))
+            if right is None:
+                continue
+            right_floor, right_precision = right
+            right_upper = upper_partial(right_floor, right_precision)
+            right_bound = f"<{'{}.{}.{}'.format(*right_upper)}" if right_upper else f"<={hyphen.group(2)}"
+            parts = [f">={hyphen.group(1)}", right_bound]
+        else:
+            parts = alternative.split()
+        valid = bool(parts)
+        for part in parts:
+            match = re.fullmatch(r"(>=|>|<=|<|=|\^|~)?(.*)", part)
+            operator, value = match.groups()
+            parsed = partial(value)
+            if parsed is None:
+                valid = False
+                break
+            floor, precision = parsed
+            if precision == 0:
+                if operator in (None, "=", "^"):
+                    continue
+                if operator == "~":
+                    continue
+                continue
+            if operator in (None, "="):
+                upper = upper_partial(floor, precision)
+                if version < floor or upper is not None and version >= upper:
+                    valid = False
+            elif operator == ">=" and version < floor:
+                valid = False
+            elif operator == ">":
+                boundary = upper_partial(floor, precision) if precision < 3 else None
+                if boundary is not None and version < boundary or boundary is None and version <= floor:
+                    valid = False
+            elif operator == "<=":
+                boundary = upper_partial(floor, precision) if precision < 3 else None
+                if boundary is not None and version >= boundary or boundary is None and version > floor:
+                    valid = False
+            elif operator == "<" and version >= floor:
+                valid = False
+            elif operator == "^":
+                upper = (floor[0] + 1, 0, 0) if floor[0] or precision == 1 else (0, floor[1] + 1, 0) if floor[1] or precision == 2 else (0, 0, floor[2] + 1)
+                if version < floor or version >= upper:
+                    valid = False
+            elif operator == "~":
+                upper = (floor[0] + 1, 0, 0) if precision == 1 else (floor[0], floor[1] + 1, 0)
+                if version < floor or version >= upper:
+                    valid = False
+            if not valid:
+                break
+        if valid:
+            return True
+    return False
+
+
+def vite_node_engines(project, package):
+    metadata = project / "node_modules" / "vite" / "package.json"
+    if not metadata.is_file():
+        lockfile = project / "package-lock.json"
+        try:
+            lock = json.loads(lockfile.read_text(encoding="utf-8"))
+            metadata = lock.get("packages", {}).get("node_modules/vite", {})
+        except (OSError, ValueError):
+            metadata = {}
+        if isinstance(metadata, dict):
+            engines_data = metadata.get("engines")
+            engines = engines_data.get("node") if isinstance(engines_data, dict) else None
+            if isinstance(engines, str) and engines:
+                requirements = [engines]
+            else:
+                requirements = []
+        else:
+            requirements = []
+    else:
+        try:
+            vite_package = json.loads(metadata.read_text(encoding="utf-8"))
+            engines = vite_package.get("engines", {}).get("node")
+        except (OSError, ValueError):
+            engines = None
+        requirements = [engines] if isinstance(engines, str) and engines else []
+
+    project_engines = package.get("engines")
+    project_engine = project_engines.get("node") if isinstance(project_engines, dict) else None
+    if isinstance(project_engine, str) and project_engine:
+        requirements.append(project_engine)
+    for pin_file in (".nvmrc", ".node-version"):
+        try:
+            pinned = (project / pin_file).read_text(encoding="utf-8").strip().removeprefix("v")
+        except OSError:
+            continue
+        if pinned and re.fullmatch(r"\d+(?:\.\d+){0,2}", pinned):
+            precision = len(pinned.split("."))
+            requirements.append(f"^{pinned}.0.0" if precision == 1 else f"~{pinned}.0" if precision == 2 else f"={pinned}")
+    # If neither Vite nor the app declares an engine, any published stable LTS
+    # release is a reasonable build runtime. The locked dependency requirements
+    # above remain the authority whenever they are available.
+    return requirements or ["*"]
+
+
+def node_cache_root():
+    configured = os.environ.get("MINIDOCK_NODE_CACHE")
+    if configured:
+        return Path(configured).expanduser()
+    cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser()
+    return cache_home / "minidock" / "node"
+
+
+def node_candidates():
+    configured = os.environ.get("MINIDOCK_NODE_BIN")
+    if configured:
+        yield Path(configured).expanduser()
+    on_path = shutil.which("node")
+    if on_path:
+        yield Path(on_path)
+
+    home = Path.home()
+    patterns = (
+        home / ".nvm/versions/node/*/bin/node",
+        home / ".local/share/mise/installs/node/*/bin/node",
+        home / ".asdf/installs/nodejs/*/bin/node",
+        home / ".volta/tools/image/node/*/bin/node",
+        Path("/tmp/node-v*/bin/node"),
+        Path("/usr/local/lib/nodejs/node-*/bin/node"),
+        Path("/opt/node*/bin/node"),
+        node_cache_root() / "*/bin/node",
+    )
+    for pattern in patterns:
+        yield from (Path(candidate) for candidate in sorted(glob.glob(str(pattern)), reverse=True))
+
+
+def cached_compatible_node(requirements):
+    seen = set()
+    for candidate in node_candidates():
+        resolved = str(candidate.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        version = read_node_version(str(candidate))
+        if version and all(version_satisfies(version, requirement) for requirement in requirements):
+            return str(candidate), version
+    return None, None
+
+
+def linux_node_architecture():
+    architecture = platform.machine().lower()
+    mapping = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}
+    if architecture not in mapping:
+        fail(f"MiniDock cannot bootstrap Node.js for Linux architecture {architecture!r}; install a compatible Node.js and set MINIDOCK_NODE_BIN")
+    return mapping[architecture]
+
+
+def download_node(requirements):
+    cache_root = node_cache_root()
+    try:
+        cache_root.mkdir(parents=True, exist_ok=True)
+        architecture = linux_node_architecture()
+        print(f"No compatible local Node.js found; selecting a verified runtime for the project's Node.js requirements into {cache_root}", flush=True)
+        with urllib.request.urlopen(f"{NODE_DIST}/index.json", timeout=30) as response:
+            releases = json.load(response)
+        releases = [release for release in releases
+                    if re.fullmatch(r"v\d+\.\d+\.\d+", release.get("version", ""))
+                    and f"linux-{architecture}" in release.get("files", [])]
+        compatible = [release for release in releases
+                      if all(version_satisfies(tuple(map(int, release["version"][1:].split("."))), requirement)
+                             for requirement in requirements)]
+        # Prefer the newest compatible LTS, then the newest compatible stable
+        # release for projects whose declared range excludes every LTS line.
+        compatible.sort(key=lambda release: tuple(map(int, release["version"][1:].split("."))), reverse=True)
+        selected = next((release for release in compatible if release.get("lts")), None)
+        if selected is None and compatible:
+            selected = compatible[0]
+        if selected is None:
+            fail(f"no official Linux Node.js release satisfies engine requirements {requirements!r}; install a compatible Node.js and set MINIDOCK_NODE_BIN")
+        version = selected["version"]
+        archive_name = f"node-{version}-linux-{architecture}.tar.xz"
+        release_url = f"{NODE_DIST}/{version}"
+        print(f"Selected Node.js {version}; verifying its official SHA-256 before use", flush=True)
+        with urllib.request.urlopen(f"{release_url}/SHASUMS256.txt", timeout=30) as response:
+            checksums = response.read(1 << 20).decode("ascii")
+        checksum = next((line.split()[0] for line in checksums.splitlines()
+                         if len(line.split()) == 2 and line.split()[1].lstrip("*") == archive_name), None)
+        if checksum is None or not re.fullmatch(r"[a-fA-F0-9]{64}", checksum):
+            fail(f"official Node.js release did not provide a valid SHA-256 for {archive_name}")
+
+        with tempfile.TemporaryDirectory(prefix="minidock-node-", dir=cache_root) as temporary:
+            archive_path = Path(temporary) / archive_name
+            digest = hashlib.sha256()
+            with urllib.request.urlopen(f"{release_url}/{archive_name}", timeout=60) as response, archive_path.open("wb") as output:
+                total = 0
+                reported = 0
+                while chunk := response.read(1 << 20):
+                    total += len(chunk)
+                    if total > 200 << 20:
+                        fail("Node.js download exceeded the 200 MiB safety limit")
+                    digest.update(chunk)
+                    output.write(chunk)
+                    if total >= reported + (10 << 20):
+                        reported = total
+                        print(f"Downloaded {total // (1 << 20)} MiB of the Node.js runtime", flush=True)
+            if digest.hexdigest().lower() != checksum.lower():
+                fail("downloaded Node.js archive failed its official SHA-256 check")
+
+            archive_prefix = f"node-{version}-linux-{architecture}/"
+            node_member = archive_prefix + "bin/node"
+            with tarfile.open(archive_path, "r:xz") as bundle:
+                try:
+                    member = bundle.getmember(node_member)
+                except KeyError:
+                    fail("verified Node.js archive did not contain its expected node executable")
+                if not member.isfile() or member.size > 100 << 20:
+                    fail("Node.js archive contained an invalid node executable")
+                source = bundle.extractfile(member)
+                if source is None:
+                    fail("could not read the node executable from the verified archive")
+                extracted = Path(temporary) / "node"
+                with source, extracted.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                npm_prefix = archive_prefix + "lib/node_modules/npm/"
+                for entry in bundle.getmembers():
+                    if not entry.name.startswith(npm_prefix):
+                        continue
+                    relative = PurePosixPath(entry.name[len(archive_prefix):])
+                    if relative.is_absolute() or ".." in relative.parts or entry.issym() or entry.islnk():
+                        fail("Node.js archive contains an unsafe npm package entry")
+                    destination = Path(temporary) / "runtime" / Path(*relative.parts)
+                    if entry.isdir():
+                        destination.mkdir(parents=True, exist_ok=True)
+                    elif entry.isfile():
+                        if entry.size > 20 << 20:
+                            fail("Node.js archive contains an unexpectedly large npm package file")
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        content = bundle.extractfile(entry)
+                        if content is None:
+                            fail("could not read npm from the verified Node.js archive")
+                        with content, destination.open("wb") as output:
+                            shutil.copyfileobj(content, output)
+            extracted.chmod(0o755)
+            final_dir = cache_root / version / "bin"
+            final_dir.mkdir(parents=True, exist_ok=True)
+            final_node = final_dir / "node"
+            os.replace(extracted, final_node)
+            runtime_npm = Path(temporary) / "runtime" / "lib/node_modules/npm"
+            if runtime_npm.is_dir():
+                final_runtime = cache_root / version / "lib/node_modules/npm"
+                if final_runtime.exists():
+                    shutil.rmtree(final_runtime)
+                final_runtime.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(runtime_npm, final_runtime)
+        return str(final_node), tuple(map(int, version[1:].split(".")))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, tarfile.TarError) as error:
+        fail(f"no compatible Node.js is installed and MiniDock could not download a verified project-compatible runtime: {error}. Install one of the project's supported Node.js versions or set MINIDOCK_NODE_BIN")
+
+
+def compatible_node(project, package):
+    requirements = vite_node_engines(project, package)
+    binary, version = cached_compatible_node(requirements)
+    if binary is None:
+        binary, version = download_node(requirements)
+    print(f"Using Node.js v{version[0]}.{version[1]}.{version[2]} for this Vite build", flush=True)
+    return binary
+
+
+def npm_command(node):
+    node_dir = Path(node).parent
+    bundled_cli = node_dir.parent / "lib/node_modules/npm/bin/npm-cli.js"
+    if bundled_cli.is_file():
+        return [node, str(bundled_cli)]
+    matching_npm = node_dir / "npm"
+    if matching_npm.is_file() and os.access(matching_npm, os.X_OK):
+        return [str(matching_npm)]
+    system_npm = shutil.which("npm")
+    if system_npm is None:
+        fail("npm was not found beside the selected Node.js runtime or on PATH")
+    return [system_npm]
 
 
 def reject_symlinks(directory):
@@ -65,19 +374,18 @@ def build_vite(project, archive, repo, package_existing_dist=False):
         fail("source builds currently support Vite projects with a package.json build script")
 
     if not package_existing_dist:
-        node_version()
-        npm = shutil.which("npm")
-        if npm is None:
-            fail("npm was not found on PATH")
+        node = compatible_node(project, package)
+        npm = npm_command(node)
         build_env = os.environ.copy()
         build_env.pop("OPENROUTER_API_KEY", None)
         build_env.pop("OPENROUTER_MODEL", None)
+        build_env["PATH"] = str(Path(node).parent) + os.pathsep + build_env.get("PATH", "")
         if not (project / "node_modules").is_dir():
             if (project / "package-lock.json").is_file():
-                run([npm, "ci"], project, build_env)
+                run([*npm, "ci"], project, build_env)
             else:
-                run([npm, "install"], project, build_env)
-        run([npm, "run", "build"], project, build_env)
+                run([*npm, "install"], project, build_env)
+        run([*npm, "run", "build"], project, build_env)
 
     dist = project / "dist"
     if not dist.is_dir() or not (dist / "index.html").is_file():
