@@ -842,7 +842,7 @@ func (m appModel) buildAIImage() tea.Cmd {
 	}
 	args := []string{"build", "-t", m.aiImageName, projectDir}
 	switch option.ID {
-	case "build", "go-build", "maven-build":
+	case "build", "angular-build", "go-build", "maven-build", "dotnet-build", "python-build":
 	case "package-existing-dist":
 		args = []string{"build", "--from-dist", "-t", m.aiImageName, projectDir}
 	case "package-existing-jar":
