@@ -2,9 +2,11 @@ package dev.minidocker.api;
 
 import dev.minidocker.image.ImageStore;
 import dev.minidocker.image.ImageNotFoundException;
+import dev.minidocker.image.DockerImageExporter;
 import org.springframework.http.MediaType;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.core.io.InputStreamResource;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -18,6 +20,8 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 
@@ -25,9 +29,11 @@ import java.util.Map;
 @RequestMapping("/api/v1/images")
 public class ImageController {
     private final ImageStore images;
+    private final DockerImageExporter dockerExporter;
 
-    public ImageController(ImageStore images) {
+    public ImageController(ImageStore images, DockerImageExporter dockerExporter) {
         this.images = images;
+        this.dockerExporter = dockerExporter;
     }
 
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -54,6 +60,30 @@ public class ImageController {
     @GetMapping
     public List<String> list() throws IOException {
         return images.list();
+    }
+
+    @GetMapping(value = "/{name}/docker", produces = "application/x-tar")
+    public ResponseEntity<InputStreamResource> exportDocker(@PathVariable("name") String name) throws IOException {
+        Path source = images.resolveArchive(name);
+        Path temporary = Files.createTempFile("minidock-docker-export-", ".tar");
+        try {
+            dockerExporter.export(source, name, temporary);
+            long size = Files.size(temporary);
+            InputStream stream = Files.newInputStream(temporary, StandardOpenOption.READ);
+            InputStream deletingStream = new java.io.FilterInputStream(stream) {
+                @Override public void close() throws IOException {
+                    try { super.close(); } finally { Files.deleteIfExists(temporary); }
+                }
+            };
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType("application/x-tar"))
+                    .contentLength(size)
+                    .header("Content-Disposition", "attachment; filename=\"" + name + "-docker.tar\"")
+                    .body(new InputStreamResource(deletingStream));
+        } catch (IOException | RuntimeException error) {
+            Files.deleteIfExists(temporary);
+            throw error;
+        }
     }
 
     @DeleteMapping("/{name}")
