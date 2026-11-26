@@ -12,7 +12,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
-from minidock_project import maven_http_port
+from minidock_project import angular_application, dotnet_project_info, maven_http_port, python_project_info
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "openrouter/free"
@@ -76,6 +76,32 @@ def payment_error(error):
 
 def inspect_project(project):
     package_file = project / "package.json"
+    if (project / "angular.json").is_file() and package_file.is_file():
+        try:
+            package = json.loads(package_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ValueError(f"could not read {package_file}: {error}") from None
+        if not isinstance(package, dict):
+            raise ValueError("package.json must contain a JSON object")
+        dependencies = package.get("dependencies", {})
+        dev_dependencies = package.get("devDependencies", {})
+        if not isinstance(dependencies, dict) or not isinstance(dev_dependencies, dict):
+            raise ValueError("package.json dependencies and devDependencies must be objects")
+        dependencies = {**dependencies, **dev_dependencies}
+        if "@angular/core" not in dependencies or "@angular/cli" not in dependencies:
+            raise ValueError("angular.json was found, but package.json does not declare @angular/core and @angular/cli")
+        app = angular_application(project)
+        locks = [name for name in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock") if (project / name).is_file()]
+        return {
+            "project_name": str(package.get("name", app["name"]))[:128],
+            "detected_builder": "angular-static",
+            "run_command": ["/usr/bin/minidock-web", "--root", "/usr/share/minidock/www", "--listen", "0.0.0.0:8080"],
+            "default_port": 8080,
+            "dependency_names": sorted(dependencies)[:200],
+            "lockfiles": locks,
+            "angular_project": app["name"],
+            "available_options": ["angular-build"],
+        }
     if package_file.is_file():
         try:
             package = json.loads(package_file.read_text(encoding="utf-8"))
@@ -105,6 +131,36 @@ def inspect_project(project):
                 "has_existing_dist": has_dist,
                 "available_options": options,
             }
+
+    csproj_files = list(project.glob("*.csproj"))
+    if csproj_files or list(project.glob("*.sln")) or list(project.glob("*.slnx")):
+        dotnet = dotnet_project_info(project)
+        web = dotnet["is_web"]
+        command = ["/opt/minidock/app/" + dotnet["assembly_name"]]
+        if web:
+            command.extend(["--urls", "http://0.0.0.0:8080"])
+        return {
+            "project_name": dotnet["assembly_name"][:128],
+            "detected_builder": "dotnet-self-contained",
+            "run_command": command,
+            "default_port": 8080 if web else None,
+            "project_file": dotnet["path"].relative_to(project).as_posix(),
+            "available_options": ["dotnet-build"],
+        }
+
+    if ((project / "requirements.txt").is_file() or (project / "pyproject.toml").is_file()
+            or (project / "minidock.json").is_file() or (project / "main.py").is_file() or (project / "app.py").is_file()):
+        info = python_project_info(project)
+        binary_name = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(info["entrypoint"]).stem).strip(".-_") or "python-app"
+        command = ["/opt/minidock/app/" + binary_name, *info["args"]]
+        return {
+            "project_name": str(project.name)[:128],
+            "detected_builder": "python-script",
+            "run_command": command,
+            "default_port": info["container_port"],
+            "python_entrypoint": info["entrypoint"],
+            "available_options": ["python-build"],
+        }
 
     if (project / "pom.xml").is_file():
         try:
@@ -166,7 +222,7 @@ def inspect_project(project):
             "available_options": ["go-build"],
         }
 
-    raise ValueError("no supported source project detected; supported adapters are Vite, Go main packages, and Maven Java projects")
+    raise ValueError("no supported source project detected; supported adapters are Vite, Angular, Go main packages, Maven Java projects, runnable C# projects, and Python script apps")
 
 
 def suggest_project_directories(project):
@@ -257,6 +313,11 @@ OPTION_DETAILS = {
         "description": "Skip npm scripts and package the existing dist/ directory with MiniDock's static server.",
         "recipe": "package existing dist/ and minidock-web; do not run project scripts.",
     },
+    "angular-build": {
+        "title": "Build Angular and create a static web image",
+        "description": "Run the Angular production build and package its browser output with MiniDock's static server.",
+        "recipe": "npm ci/install when needed; npm run build; package the configured Angular browser output and minidock-web.",
+    },
     "go-build": {
         "title": "Compile a standalone Linux Go image",
         "description": "Compile the selected Go main package and package the binary into a minimal root filesystem.",
@@ -266,6 +327,16 @@ OPTION_DETAILS = {
         "title": "Build the Java app and bundle a Java runtime",
         "description": "Package an executable Maven JAR and a minimized Java runtime inside the image.",
         "recipe": "mvnw/mvn -Dmaven.test.skip=true package; jlink runtime; bundle executable JAR and required Linux libraries.",
+    },
+    "dotnet-build": {
+        "title": "Publish a self-contained Linux C# image",
+        "description": "Publish the .NET project for this Linux CPU architecture and bundle its runtime and host libraries.",
+        "recipe": "dotnet publish -c Release -r linux-x64/linux-arm64 --self-contained true; package the app and required Linux shared libraries.",
+    },
+    "python-build": {
+        "title": "Package a Python script app for Linux",
+        "description": "Install the declared Python dependencies, bundle the app with PyInstaller, and include required Linux shared libraries.",
+        "recipe": "install requirements.txt or the pyproject package in a temporary build environment; PyInstaller onedir; package the executable and libraries.",
     },
     "package-existing-jar": {
         "title": "Package the existing executable Java JAR",
@@ -309,8 +380,8 @@ def validate_plan(value, profile, image_name, project_dir):
 def request_turn(messages, image_name, profile, project_dir, api_key, model=None, opener=urllib.request.urlopen, staged_images=None):
     system = (
         "You are MiniDock's image build and run guide. MiniDock is a deliberately small Linux rootfs image builder and runtime, not Docker/OCI. "
-        "Current source adapters are Vite static sites, Go main packages compiled as CGO-disabled Linux binaries, and Maven "
-        "executable JARs bundled with a jlink Java runtime and required host shared libraries. Images need a compatible Linux "
+        "Current source adapters are Vite and Angular static sites, Go main packages compiled as CGO-disabled Linux binaries, Maven "
+        "executable JARs bundled with a jlink Java runtime, self-contained Linux C# projects, and simple Python script apps bundled with PyInstaller. Images need a compatible Linux "
         "kernel at run time; the host does not need the language runtime when it is bundled in the image. Explain the detected app "
         "in plain language and rank all available option IDs "
         "for this project from most suitable to least suitable. The IDs are fixed local recipes, not commands. "
@@ -525,8 +596,11 @@ def main():
         if selected_project and folder_question_was_asked:
             builder_names = {
                 "vite-static": "a Vite frontend",
+                "angular-static": "an Angular frontend",
                 "go-binary": "a Go application",
                 "maven-java": "a Maven Java application",
+                "dotnet-self-contained": "a C# application",
+                "python-script": "a Python script app",
             }
             summary = (f"I found {builder_names.get(profile['detected_builder'], 'a supported app')} in "
                        f"{selected_project}. Choose a local build option below to create the image.")
