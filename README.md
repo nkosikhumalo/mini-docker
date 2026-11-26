@@ -45,9 +45,10 @@ own process identity and lifecycle.
 ### What this project is—and isn't
 
 MiniDock is a compact local system for learning how image packaging and Linux
-process isolation fit together. It supports a few explicit source-build
-adapters: Vite, Go main packages, and Maven executable Java projects. It can
-also stage an already-prepared `.tar` or `.tar.gz` Linux root filesystem.
+process isolation fit together. It supports explicit source-build adapters for
+Vite and Angular frontends, Go main packages, Maven executable Java projects,
+runnable C# projects, and simple Python script apps. It can also stage an
+already-prepared `.tar` or `.tar.gz` Linux root filesystem.
 
 It is **not** a Docker clone or a general-purpose production runtime. It does
 not build arbitrary Dockerfiles, pull from Docker Hub, or run Docker/OCI images.
@@ -129,17 +130,26 @@ features. For development, install:
 - Go (the version selected by `go-runtime/go.mod`).
 - Java 21 and the repository's Maven wrapper.
 - `make`, Python 3, `curl`, and `sudo` for the root `run.sh` workflow.
-- For Vite builds: Go for the small static server packaged with the site.
-  MiniDock reads the Node.js requirements from Vite's installed or locked
-  package metadata and the project's `engines.node` field. It uses a matching
-  local Node.js when available, or downloads and SHA-256 verifies a compatible
-  official Linux runtime and its bundled npm into the user's cache. Set
-  `MINIDOCK_NODE_BIN` or `MINIDOCK_NODE_CACHE` to override those paths. Automatic
-  downloads support Linux x64 and arm64; other architectures need a compatible
-  local Node.js.
+- For Vite and Angular builds: npm and Go for the small static server packaged
+  with the site. MiniDock reads Node.js requirements from the frontend's
+  installed or locked framework packages and the project's `engines.node`
+  field. It uses a matching local Node.js when available, or downloads and
+  SHA-256 verifies a compatible official Linux runtime and its bundled npm into
+  the user's cache. Set `MINIDOCK_NODE_BIN` or `MINIDOCK_NODE_CACHE` to override
+  those paths. Automatic downloads support Linux x64 and arm64; other
+  architectures need a compatible local Node.js. Angular requires an npm
+  `package-lock.json` and supports browser/static output; server-rendered
+  Angular output needs a separate server adapter.
 - For Go builds: the Go toolchain and module dependencies.
 - For Maven builds: Maven or `mvnw`, a JDK with `jlink`, and project
   dependencies.
+- For C# builds: the .NET SDK, NuGet access for restore, and a Linux x64 or
+  arm64 host. MiniDock publishes a self-contained app for that host architecture.
+- For Python builds: Python 3 with `venv`/`pip`, project dependencies, and
+  network access to install PyInstaller into a temporary build environment.
+  The initial adapter packages one script entrypoint; dynamic
+  imports and external data files may need a PyInstaller spec or a future
+  adapter option.
 - For container networking: `iproute2`, `nsenter`, `iptables`, and permission
   to configure bridge/veth networking.
 - For CPU, memory, or process-count limits: a **writable delegated cgroups v2
@@ -323,20 +333,53 @@ command is an argument array, avoiding shell parsing. `container_port` is
 where the app listens inside the container; Java can publish it on a host
 localhost port later.
 
+### Export an image for Docker
+
+MiniDock's native image is a root-filesystem archive. To use an image with
+Docker, export it into Docker's image archive format:
+
+```bash
+bin/minidock export docker backend
+docker load -i backend-docker.tar
+docker run --rm -p 8080:8080 backend:latest
+```
+
+You can choose the output path with `bin/minidock export docker backend
+./artifacts/backend.tar`. The export carries the image startup command and
+declared application port into the Docker image configuration. Runtime
+environment values, including values supplied from a project `.env` file, are
+not copied into the export. Pass those to Docker separately when needed, for
+example with `docker run --env-file .env ...`.
+
+Docker publishes a port only when requested with `-p`; MiniDock's port
+metadata becomes `EXPOSE` information and does not publish it automatically.
+The archive targets Linux on the architecture where MiniDock runs. It does not
+bundle a Linux kernel, and apps that depend on external services or host
+libraries still need those at runtime. Docker Desktop can load the image, but
+the resulting container uses Docker Desktop's Linux environment.
+
 ### Build adapters
 
-The adapter in `scripts/minidock_build.py` detects a supported project and
-performs known steps. It does not accept commands written by the model. A
-Vite adapter, for example, runs the project's build script, packages `dist/`
-with MiniDock's static server, writes image metadata, and creates a tar.
+The adapter in `scripts/minidock_build.py` detects a supported project from its
+manifest files and performs known steps. It does not accept commands written
+by the model. For example, `angular.json` plus Angular packages identifies an
+Angular app; a `.csproj` identifies a runnable C# app; and Python project files
+plus `main.py` or `app.py` identify a simple Python script app. Go requires
+`go.mod` and a `package main`; Java uses `pom.xml`. The user selects a project
+folder, not an arbitrary source file, so MiniDock can see its dependencies and
+build configuration.
+
+A Vite or Angular adapter runs the project's npm build script, packages its
+static browser output with MiniDock's static server, writes image metadata,
+and creates a tar.
 
 ```python
 def build_project(project_dir, output_archive):
-    kind = detect_supported_project(project_dir)
-    if kind != "vite":
+    adapter = adapters.get(detect_supported_project(project_dir))
+    if adapter is None:
         raise UnsupportedProject("no MiniDock adapter for this project")
 
-    run_vite_build(project_dir)  # a local, reviewed adapter step
+    adapter.build(project_dir)  # fixed local adapter steps
     rootfs = make_temporary_rootfs()
     copy_static_output(project_dir, rootfs)
     copy_minidock_web_server(rootfs)
@@ -354,9 +397,29 @@ validate paths. Project build tools run on the host as the builder user.
 | Adapter | Build result | What goes in the rootfs |
 | --- | --- | --- |
 | Vite | Static frontend bundle | Static files and MiniDock web server |
+| Angular | Static browser bundle | Configured browser output and MiniDock web server |
 | Go | Linux executable | Application binary and metadata |
 | Maven Java | Executable JAR and `jlink` runtime | JAR, minimized Java runtime, required libraries |
+| C#/.NET | Self-contained Linux app | Published app, .NET runtime, required host libraries |
+| Python | PyInstaller onedir app | Python app executable, bundled runtime/dependencies, required host libraries |
 | Rootfs archive | No source compilation | The archive supplied by the user |
+
+For Python projects with more than one likely script, add a `minidock.json`
+file to the project root to select the entrypoint and optional port:
+
+```json
+{
+  "python": {
+    "entrypoint": "src/server.py",
+    "args": [],
+    "container_port": 8080
+  }
+}
+```
+
+The port is metadata for MiniDock's published-port feature. The Python app
+still needs to bind to `0.0.0.0` itself. Folder detection reads these project
+markers locally; the AI does not inspect source files to guess a language.
 
 ### Store images safely
 
