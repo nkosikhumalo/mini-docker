@@ -38,6 +38,7 @@ Usage:
   minidock build [--from-dist|--from-jar] -t NAME PROJECT_DIR|IMAGE.tar[.gz]
   minidock ui [API_URL]
   minidock images
+  minidock export docker IMAGE [OUTPUT.tar]
   minidock image rm IMAGE_NAME
   minidock ask "describe the container you want"
   minidock ask-build -t NAME PROJECT_DIR "describe the image to build"
@@ -105,6 +106,26 @@ EOF
     [[ $# -eq 0 ]] || usage
     response=$(curl --fail-with-body -sS "$api/api/v1/images")
     printf '%s' "$response" | ui_render images
+    ;;
+  export)
+    [[ ${1:-} == docker && $# -ge 2 && $# -le 3 ]] || usage
+    image=$2
+    [[ $image =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]] || {
+      echo "minidock export: Docker image names must be lowercase and use letters, digits, '.', '_' or '-'" >&2
+      exit 2
+    }
+    output=${3:-"$image-docker.tar"}
+    [[ ! -d $output ]] || { echo "minidock export: output path is a directory: $output" >&2; exit 2; }
+    temporary=$(mktemp "${output}.tmp.XXXXXX") || exit 1
+    trap 'rm -f -- "$temporary"' EXIT
+    if ! curl --fail-with-body -sS "$api/api/v1/images/$image/docker" -o "$temporary"; then
+      cat "$temporary" >&2 2>/dev/null || true
+      exit 1
+    fi
+    mv -f -- "$temporary" "$output"
+    trap - EXIT
+    printf 'Exported %s as a Docker-loadable image archive: %s\n' "$image:latest" "$output"
+    printf 'Load it with: docker load -i %q\n' "$output"
     ;;
   image)
     [[ $# -eq 2 && $1 == rm && $2 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || usage
@@ -174,7 +195,7 @@ EOF
       exit 0
     }
     case "$selected_option" in
-      build) "$repo/bin/minidock" build -t "$image_name" "$project_dir" ;;
+      build|angular-build|dotnet-build|python-build) "$repo/bin/minidock" build -t "$image_name" "$project_dir" ;;
       package-existing-dist) "$repo/bin/minidock" build --from-dist -t "$image_name" "$project_dir" ;;
       go-build) "$repo/bin/minidock" build -t "$image_name" "$project_dir" ;;
       maven-build) "$repo/bin/minidock" build -t "$image_name" "$project_dir" ;;
