@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build supported frontend source projects into MiniDock rootfs archives."""
+"""Build supported source projects into MiniDock Linux rootfs archives."""
 
 import glob
 import hashlib
@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 from pathlib import PurePosixPath
 from pathlib import Path
-from minidock_project import maven_http_port
+from minidock_project import angular_application, dotnet_project_info, maven_http_port, python_project_info
 
 
 def fail(message):
@@ -132,31 +132,28 @@ def version_satisfies(version, engine_range):
     return False
 
 
-def vite_node_engines(project, package):
-    metadata = project / "node_modules" / "vite" / "package.json"
-    if not metadata.is_file():
-        lockfile = project / "package-lock.json"
-        try:
-            lock = json.loads(lockfile.read_text(encoding="utf-8"))
-            metadata = lock.get("packages", {}).get("node_modules/vite", {})
-        except (OSError, ValueError):
-            metadata = {}
-        if isinstance(metadata, dict):
-            engines_data = metadata.get("engines")
-            engines = engines_data.get("node") if isinstance(engines_data, dict) else None
-            if isinstance(engines, str) and engines:
-                requirements = [engines]
-            else:
-                requirements = []
-        else:
-            requirements = []
-    else:
-        try:
-            vite_package = json.loads(metadata.read_text(encoding="utf-8"))
-            engines = vite_package.get("engines", {}).get("node")
-        except (OSError, ValueError):
-            engines = None
-        requirements = [engines] if isinstance(engines, str) and engines else []
+def node_engine_requirements(project, package, package_names):
+    requirements = []
+    lock = {}
+    try:
+        lock = json.loads((project / "package-lock.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    locked_packages = lock.get("packages", {}) if isinstance(lock, dict) else {}
+    for name in package_names:
+        metadata = project / "node_modules" / name / "package.json"
+        package_metadata = {}
+        if metadata.is_file():
+            try:
+                package_metadata = json.loads(metadata.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                package_metadata = {}
+        if not package_metadata and isinstance(locked_packages, dict):
+            package_metadata = locked_packages.get("node_modules/" + name, {})
+        engines_data = package_metadata.get("engines") if isinstance(package_metadata, dict) else None
+        engines = engines_data.get("node") if isinstance(engines_data, dict) else None
+        if isinstance(engines, str) and engines:
+            requirements.append(engines)
 
     project_engines = package.get("engines")
     project_engine = project_engines.get("node") if isinstance(project_engines, dict) else None
@@ -170,7 +167,7 @@ def vite_node_engines(project, package):
         if pinned and re.fullmatch(r"\d+(?:\.\d+){0,2}", pinned):
             precision = len(pinned.split("."))
             requirements.append(f"^{pinned}.0.0" if precision == 1 else f"~{pinned}.0" if precision == 2 else f"={pinned}")
-    # If neither Vite nor the app declares an engine, any published stable LTS
+    # If no dependency or app declares an engine, any published stable LTS
     # release is a reasonable build runtime. The locked dependency requirements
     # above remain the authority whenever they are available.
     return requirements or ["*"]
@@ -332,12 +329,12 @@ def download_node(requirements):
         fail(f"no compatible Node.js is installed and MiniDock could not download a verified project-compatible runtime: {error}. Install one of the project's supported Node.js versions or set MINIDOCK_NODE_BIN")
 
 
-def compatible_node(project, package):
-    requirements = vite_node_engines(project, package)
+def compatible_node(project, package, package_names):
+    requirements = node_engine_requirements(project, package, package_names)
     binary, version = cached_compatible_node(requirements)
     if binary is None:
         binary, version = download_node(requirements)
-    print(f"Using Node.js v{version[0]}.{version[1]}.{version[2]} for this Vite build", flush=True)
+    print(f"Using Node.js v{version[0]}.{version[1]}.{version[2]} for this frontend build", flush=True)
     return binary
 
 
@@ -361,44 +358,32 @@ def reject_symlinks(directory):
             fail(f"built output contains a symlink, which this small image builder does not package: {path.relative_to(directory)}")
 
 
-def build_vite(project, archive, repo, package_existing_dist=False):
-    package_file = project / "package.json"
-    if not package_file.is_file():
-        fail(f"{project} is not a supported source project (package.json was not found)")
-    try:
-        package = json.loads(package_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        fail(f"could not read package.json: {error}")
-    dependencies = {**package.get("dependencies", {}), **package.get("devDependencies", {})}
-    if "vite" not in dependencies or not package.get("scripts", {}).get("build"):
-        fail("source builds currently support Vite projects with a package.json build script")
+def prepare_npm_project(project, package, package_names):
+    if not (project / "package-lock.json").is_file() and any((project / lock).is_file() for lock in ("pnpm-lock.yaml", "yarn.lock")):
+        fail("this adapter currently uses npm; include a package-lock.json or install dependencies with npm before building")
+    node = compatible_node(project, package, package_names)
+    npm = npm_command(node)
+    env = clean_project_environment()
+    env["PATH"] = str(Path(node).parent) + os.pathsep + env.get("PATH", "")
+    if not (project / "node_modules").is_dir():
+        if (project / "package-lock.json").is_file():
+            run([*npm, "ci"], project, env)
+        else:
+            run([*npm, "install"], project, env)
+    return npm, env
 
-    if not package_existing_dist:
-        node = compatible_node(project, package)
-        npm = npm_command(node)
-        build_env = os.environ.copy()
-        build_env.pop("OPENROUTER_API_KEY", None)
-        build_env.pop("OPENROUTER_MODEL", None)
-        build_env["PATH"] = str(Path(node).parent) + os.pathsep + build_env.get("PATH", "")
-        if not (project / "node_modules").is_dir():
-            if (project / "package-lock.json").is_file():
-                run([*npm, "ci"], project, build_env)
-            else:
-                run([*npm, "install"], project, build_env)
-        run([*npm, "run", "build"], project, build_env)
 
-    dist = project / "dist"
+def package_static_web(dist, archive, repo, command_hint):
     if not dist.is_dir() or not (dist / "index.html").is_file():
-        fail(f"Vite build did not produce {dist}/index.html")
+        fail(f"static frontend build did not produce {dist}/index.html")
     reject_symlinks(dist)
-
     go = shutil.which("go")
     if go is None:
         fail("Go is required to build MiniDock's small static frontend server")
     with tempfile.TemporaryDirectory(prefix="minidock-source-build-") as temporary:
         work = Path(temporary)
         webserver = work / "minidock-web"
-        env = os.environ.copy()
+        env = clean_project_environment()
         env.update({"CGO_ENABLED": "0", "GOOS": "linux"})
         env.setdefault("GOCACHE", "/tmp/minidock-go-cache")
         run([go, "build", "-trimpath", "-ldflags=-s -w", "-o", str(webserver), "./cmd/minidock-web"], repo / "go-runtime", env)
@@ -410,17 +395,66 @@ def build_vite(project, archive, repo, package_existing_dist=False):
         web_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(webserver, server_dir / "minidock-web")
         shutil.copytree(dist, web_dir)
-        write_image_metadata(rootfs,
-                             ["/usr/bin/minidock-web", "--root", "/usr/share/minidock/www",
-                              "--listen", "0.0.0.0:8080"], 8080)
-        with tarfile.open(archive, "w:gz", format=tarfile.PAX_FORMAT) as bundle:
-            bundle.add(rootfs, arcname=".")
+        command = ["/usr/bin/minidock-web", "--root", "/usr/share/minidock/www", "--listen", "0.0.0.0:8080"]
+        write_image_metadata(rootfs, command, 8080)
+        write_rootfs_archive(rootfs, archive)
+    print(command_hint)
+
+
+def build_vite(project, archive, repo, package_existing_dist=False):
+    package_file = project / "package.json"
+    if not package_file.is_file():
+        fail(f"{project} is not a supported source project (package.json was not found)")
+    try:
+        package = json.loads(package_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        fail(f"could not read package.json: {error}")
+    dependencies = package.get("dependencies", {})
+    dev_dependencies = package.get("devDependencies", {})
+    if not isinstance(dependencies, dict) or not isinstance(dev_dependencies, dict):
+        fail("package.json dependencies and devDependencies must be objects")
+    dependencies = {**dependencies, **dev_dependencies}
+    if "vite" not in dependencies or not package.get("scripts", {}).get("build"):
+        fail("source builds currently support Vite projects with a package.json build script")
+
+    if not package_existing_dist:
+        npm, build_env = prepare_npm_project(project, package, ("vite",))
+        run([*npm, "run", "build"], project, build_env)
+    dist = project / "dist"
+    package_static_web(dist, archive, repo, "Run with: bin/minidock run -d IMAGE /usr/bin/minidock-web --root /usr/share/minidock/www --listen 0.0.0.0:8080")
+
+
+def build_angular(project, archive, repo):
+    package_file = project / "package.json"
+    try:
+        package = json.loads(package_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        fail(f"could not read package.json: {error}")
+    dependencies = package.get("dependencies", {})
+    dev_dependencies = package.get("devDependencies", {})
+    if not isinstance(dependencies, dict) or not isinstance(dev_dependencies, dict):
+        fail("package.json dependencies and devDependencies must be objects")
+    dependencies = {**dependencies, **dev_dependencies}
+    if "@angular/core" not in dependencies or "@angular/cli" not in dependencies:
+        fail("Angular builds need @angular/core and @angular/cli in package.json")
+    settings = angular_application(project)
+    npm, build_env = prepare_npm_project(project, package, ("@angular/core", "@angular/cli", "@angular/build", "@angular-devkit/build-angular"))
+    if not package.get("scripts", {}).get("build"):
+        fail("Angular package.json needs a build script (usually ng build)")
+    run([*npm, "run", "build"], project, build_env)
+    dist = (project / settings["output_path"]).resolve()
+    if not dist.is_relative_to(project.resolve()):
+        fail("Angular outputPath must stay inside the project folder")
+    if settings["browser_subdir"] and (dist / settings["browser_subdir"] / "index.html").is_file():
+        dist /= settings["browser_subdir"]
+    package_static_web(dist, archive, repo, "Run with: bin/minidock run -d IMAGE /usr/bin/minidock-web --root /usr/share/minidock/www --listen 0.0.0.0:8080")
 
 
 def clean_project_environment():
     env = os.environ.copy()
-    env.pop("OPENROUTER_API_KEY", None)
-    env.pop("OPENROUTER_MODEL", None)
+    for name in ("OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_FAST_MODEL",
+                 "OPENROUTER_HEAVY_MODEL", "OPENROUTER_MAX_TOKENS"):
+        env.pop(name, None)
     return env
 
 
@@ -517,10 +551,10 @@ def find_executable_jar(project):
     return candidates[0]
 
 
-def copy_runtime_libraries(runtime, rootfs):
+def copy_runtime_libraries(runtime, rootfs, runtime_name="application"):
     ldd = shutil.which("ldd")
     if ldd is None:
-        fail("ldd is required to bundle the Java runtime's Linux shared libraries")
+        fail(f"ldd is required to bundle {runtime_name}'s Linux shared libraries")
     libraries = set()
     for path in runtime.rglob("*"):
         if path.is_symlink() or not path.is_file():
@@ -540,7 +574,7 @@ def copy_runtime_libraries(runtime, rootfs):
         output = result.stdout + result.stderr
         if "not found" in output:
             missing = next((line.strip() for line in output.splitlines() if "not found" in line), "unknown library")
-            fail(f"cannot bundle Java runtime dependency for {path.relative_to(runtime)}: {missing}")
+            fail(f"cannot bundle {runtime_name} dependency for {path.relative_to(runtime)}: {missing}")
         for line in output.splitlines():
             match = re.search(r"=>\s+(/\S+)", line) or re.match(r"\s*(/\S+)\s+\(", line)
             if match:
@@ -549,7 +583,7 @@ def copy_runtime_libraries(runtime, rootfs):
         try:
             resolved = library.resolve(strict=True)
         except OSError:
-            fail(f"could not resolve Java runtime library {library}")
+            fail(f"could not resolve {runtime_name} library {library}")
         destination = rootfs / library.relative_to("/")
         destination.parent.mkdir(parents=True, exist_ok=True)
         if library.is_symlink():
@@ -654,6 +688,109 @@ def build_java(project, archive, package_existing_jar=False):
     print("Run with: bin/minidock run -d IMAGE /usr/lib/minidock-jre/bin/java -jar /opt/minidock/app/app.jar")
 
 
+def linux_dotnet_rid():
+    architecture = platform.machine().lower()
+    if architecture in {"x86_64", "amd64"}:
+        return "linux-x64"
+    if architecture in {"aarch64", "arm64"}:
+        return "linux-arm64"
+    fail(f"C# images are not configured for Linux architecture {architecture!r}")
+
+
+def build_dotnet(project, archive):
+    if sys.platform != "linux":
+        fail("C# MiniDock images must be built on Linux for the current host CPU architecture")
+    dotnet = shutil.which("dotnet")
+    if dotnet is None:
+        fail("the .NET SDK is required to build C# projects; install it on the host and retry")
+    try:
+        info = dotnet_project_info(project)
+    except ValueError as error:
+        fail(str(error))
+    env = clean_project_environment()
+    with tempfile.TemporaryDirectory(prefix="minidock-dotnet-build-") as temporary:
+        work = Path(temporary)
+        publish = work / "publish"
+        run([dotnet, "publish", str(info["path"]), "-c", "Release", "-r", linux_dotnet_rid(),
+             "--self-contained", "true", "-p:UseAppHost=true", "-p:PublishSingleFile=false",
+             "-o", str(publish)], project, env)
+        apphost = publish / info["assembly_name"]
+        if not apphost.is_file():
+            fail(f"dotnet publish did not produce the expected Linux apphost {apphost.name}")
+        rootfs = work / "rootfs"
+        app_dir = rootfs / "opt" / "minidock" / "app"
+        app_dir.parent.mkdir(parents=True)
+        shutil.copytree(publish, app_dir)
+        copy_runtime_libraries(publish, rootfs, "C# application")
+        command = ["/opt/minidock/app/" + info["assembly_name"]]
+        port = None
+        if info["is_web"]:
+            command.extend(["--urls", "http://0.0.0.0:8080", "--contentRoot", "/opt/minidock/app"])
+            port = 8080
+        write_image_metadata(rootfs, command, port)
+        write_rootfs_archive(rootfs, archive)
+    print(f"Run with: bin/minidock run -d IMAGE {command[0]}" + (" --urls http://0.0.0.0:8080" if port else ""))
+
+
+def python_source_copy(project, destination):
+    ignored_names = {".git", ".venv", "venv", "__pycache__", "node_modules",
+                     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox"}
+    for path in project.rglob("*"):
+        if path.is_symlink():
+            fail(f"Python source builds do not package symlinks: {path.relative_to(project)}")
+    def ignore(directory, names):
+        return {name for name in names if name in ignored_names or name == ".env" or name.startswith(".env.")}
+    shutil.copytree(project, destination, ignore=ignore, symlinks=False)
+
+
+def build_python(project, archive):
+    if sys.platform != "linux":
+        fail("Python MiniDock images must be built on Linux for the current host CPU architecture")
+    python = shutil.which("python3")
+    if python is None:
+        fail("Python 3 is required to build a Python project")
+    try:
+        info = python_project_info(project)
+    except ValueError as error:
+        fail(str(error))
+    env = clean_project_environment()
+    with tempfile.TemporaryDirectory(prefix="minidock-python-build-") as temporary:
+        work = Path(temporary)
+        source = work / "project"
+        python_source_copy(project, source)
+        venv = work / "venv"
+        run([python, "-m", "venv", str(venv)], source, env)
+        venv_python = venv / "bin" / "python"
+        pip = [str(venv_python), "-m", "pip", "install", "--disable-pip-version-check"]
+        run([*pip, "pyinstaller"], source, env)
+        if (source / "pyproject.toml").is_file():
+            run([*pip, "."], source, env)
+        if (source / "requirements.txt").is_file():
+            run([*pip, "-r", "requirements.txt"], source, env)
+        output = work / "dist"
+        spec = work / "spec"
+        build_temp = work / "pyinstaller-work"
+        entrypoint = source / info["entrypoint"]
+        name = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(info["entrypoint"]).stem).strip(".-_") or "python-app"
+        command = [str(venv / "bin" / "pyinstaller"), "--noconfirm", "--clean", "--onedir",
+                   "--name", name, "--distpath", str(output), "--specpath", str(spec),
+                   "--workpath", str(build_temp), str(entrypoint)]
+        run(command, source, env)
+        bundle = output / name
+        executable = bundle / name
+        if not executable.is_file():
+            fail("PyInstaller did not produce the expected Python app executable")
+        rootfs = work / "rootfs"
+        app_dir = rootfs / "opt" / "minidock" / "app"
+        app_dir.parent.mkdir(parents=True)
+        shutil.copytree(bundle, app_dir)
+        copy_runtime_libraries(bundle, rootfs, "Python application")
+        metadata_command = ["/opt/minidock/app/" + name, *info["args"]]
+        write_image_metadata(rootfs, metadata_command, info["container_port"])
+        write_rootfs_archive(rootfs, archive)
+    print(f"Run with: bin/minidock run -d IMAGE {metadata_command[0]}")
+
+
 def main():
     mode = sys.argv[3] if len(sys.argv) == 4 else "build"
     if len(sys.argv) not in (3, 4) or mode not in ("build", "--from-dist", "--from-jar"):
@@ -666,6 +803,7 @@ def main():
     if not archive.parent.is_dir():
         fail(f"output directory does not exist: {archive.parent}")
     package_file = project / "package.json"
+    is_angular = (project / "angular.json").is_file()
     vite_project = False
     if package_file.is_file():
         try:
@@ -684,7 +822,11 @@ def main():
                 and bool(scripts.get("build"))
             )
 
-    if vite_project:
+    if is_angular:
+        if mode != "build":
+            fail("--from-dist/--from-jar modes are not available for Angular projects yet")
+        build_angular(project, archive, repo)
+    elif vite_project:
         if mode == "--from-jar":
             fail("--from-jar only applies to Maven Java projects")
         build_vite(project, archive, repo, mode == "--from-dist")
@@ -696,12 +838,21 @@ def main():
         if mode != "build":
             fail("existing-binary options are not available for Go projects yet")
         build_go(project, archive)
+    elif list(project.glob("*.csproj")) or list(project.glob("*.sln")) or list(project.glob("*.slnx")):
+        if mode != "build":
+            fail("existing-artifact options are not available for C# projects yet")
+        build_dotnet(project, archive)
+    elif ((project / "requirements.txt").is_file() or (project / "pyproject.toml").is_file()
+          or (project / "minidock.json").is_file() or (project / "main.py").is_file() or (project / "app.py").is_file()):
+        if mode != "build":
+            fail("existing-artifact options are not available for Python projects yet")
+        build_python(project, archive)
     elif package_file.is_file():
         if mode == "--from-jar":
             fail("--from-jar only applies to Maven Java projects")
         build_vite(project, archive, repo, mode == "--from-dist")
     else:
-        fail("no supported source project detected; supported adapters are Vite, Go main packages, and Maven Java projects")
+        fail("no supported source project detected; supported adapters are Vite, Angular, Go main packages, Maven Java projects, runnable C# projects, and Python script apps")
     print(f"MiniDock image archive created: {archive}")
 
 
