@@ -382,7 +382,7 @@ def validate_plan(value, profile, image_name, project_dir):
 
 
 def request_turn(messages, image_name, profile, project_dir, api_key, model=None, opener=urllib.request.urlopen,
-                 staged_images=None, available_projects=None):
+                 staged_images=None, available_projects=None, matched_image=None):
     system = (
         "You are MiniDock's conversational guide for building and running local images. MiniDock is a deliberately small Linux rootfs image builder and runtime, not Docker/OCI. "
         "Current source adapters are Vite and Angular static sites, Go main packages compiled as CGO-disabled Linux binaries, Maven "
@@ -400,6 +400,7 @@ def request_turn(messages, image_name, profile, project_dir, api_key, model=None
         "If the user greets you or starts a general conversation, respond naturally and ask what they want help with. Do not ask them "
         "to choose a project folder unless they have requested a project build and the folder is still unclear. If available project "
         "folders are supplied, use only those exact folder names and include them in the question when asking them to choose. "
+        "If the trusted_matched_image field is present, it is MiniDock's high-confidence match to the user's image name; use that exact staged image and mention the match briefly if useful. Do not ask the user to confirm a high-confidence typo correction. "
         "If the user asks to run or start an image, match the requested image name against staged_images; if there is one clear match, use that exact name. Do not ask for a project folder to run a staged image. "
         "The staged image contains its own MiniDock startup metadata. Return an empty command array and null container_port so MiniDock reads the trusted command and port from the image locally. Never invent a command or infer run details from the selected source folder. "
         "If no staged image clearly matches, ask which exact staged image they mean, using only names from staged_images. If there is no staged image, explain that they need to build or stage one first. "
@@ -431,6 +432,7 @@ def request_turn(messages, image_name, profile, project_dir, api_key, model=None
         "available_options": profile["available_options"],
         "available_project_folders": available_projects or [],
         "staged_images": staged_images or [],
+        "trusted_matched_image": matched_image,
     }, ensure_ascii=False)
     chat_messages = [dict(message) for message in messages]
     system_with_context = system + "\n\nTrusted MiniDock workspace context: " + context
@@ -479,6 +481,20 @@ def request_turn(messages, image_name, profile, project_dir, api_key, model=None
         except (ValueError, KeyError, IndexError, TypeError):
             if attempt == 1:
                 raise RuntimeError("OpenRouter returned an invalid or empty JSON completion after one retry") from None
+    if matched_image is not None:
+        if matched_image not in (staged_images or []):
+            raise RuntimeError("MiniDock matched an image that is not staged locally")
+        transcript = " ".join(message["content"] for message in messages if message["role"] == "user")
+        message = (
+            f"I matched your request to the staged image '{matched_image}'. MiniDock is starting it using the startup details saved in the image. "
+            "It will check whether this image serves a web app and show you the actual URL when it is ready."
+        )
+        if re.search(r"\b(two|both|multiple)\s+(images|containers)\b", transcript, re.IGNORECASE):
+            message += " MiniDock can run multiple images as separate containers, with a separate URL for each web app that exposes a port."
+        answer = {
+            "kind": "run", "image": matched_image, "command": [], "container_port": None,
+            "message": message,
+        }
     if isinstance(answer, dict) and answer.get("kind") == "plan":
         return validate_plan(answer, profile, image_name, project_dir)
     if isinstance(answer, dict) and answer.get("kind") == "run":
@@ -575,13 +591,22 @@ def main():
             payload = json.loads(sys.stdin.read(24 << 10))
         except ValueError:
             fail("chat request must be valid JSON")
-        messages = payload.get("messages") if isinstance(payload, dict) and set(payload) == {"messages", "images"} else None
+        if isinstance(payload, dict) and set(payload) in (
+            {"messages", "images"},
+            {"messages", "images", "matched_image"},
+        ):
+            messages = payload.get("messages")
+        else:
+            messages = None
         staged_images = payload.get("images", []) if isinstance(payload, dict) else []
+        matched_image = payload.get("matched_image") if isinstance(payload, dict) else None
         if not isinstance(staged_images, list) or len(staged_images) > 256 or any(
             not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name)
             for name in staged_images
         ):
             fail("chat request contains an invalid staged-image list")
+        if matched_image is not None and (not isinstance(matched_image, str) or matched_image not in staged_images):
+            fail("chat request contains an invalid matched image")
         if not isinstance(messages, list) or not 1 <= len(messages) <= 9:
             fail("chat request must contain between 1 and 9 messages")
         previous_role = None
@@ -634,7 +659,7 @@ def main():
         try:
             answer = request_turn(messages, image_name, profile, project_dir.as_posix(), api_key,
                                   os.environ.get("OPENROUTER_HEAVY_MODEL"), staged_images=staged_images,
-                                  available_projects=suggestions)
+                                  available_projects=suggestions, matched_image=matched_image)
         except (RuntimeError, ValueError) as error:
             fail(str(error))
         if answer["kind"] != "plan" and len(messages) >= 9:
