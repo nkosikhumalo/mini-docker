@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,7 @@ type overviewMsg struct {
 	images     []string
 	containers []containerView
 	err        error
+	manual     bool
 }
 
 type appResultMsg struct {
@@ -80,6 +82,8 @@ type aiRunPlan struct {
 	Command       []string
 	ContainerPort *int
 }
+
+var aiRunURLPattern = regexp.MustCompile(`https?://[^\s]+`)
 
 type aiTurnMsg struct {
 	reply aiBuildReply
@@ -189,6 +193,9 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.images, m.containers = message.images, message.containers
 			m.errText = ""
+			if message.manual {
+				m.notice = fmt.Sprintf("Refreshed: %d images and %d container records.", len(m.images), len(m.containers))
+			}
 			if m.pendingStartID != "" {
 				for _, container := range m.containers {
 					if container.ID != m.pendingStartID {
@@ -306,7 +313,15 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else if message.reply.Kind == "run" {
 			m.aiRunPlan = &aiRunPlan{Image: message.reply.Image, Command: message.reply.Command,
 				ContainerPort: message.reply.ContainerPort}
-			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "I found the image and its startup command. Reply yes to start it, or tell me what you want changed."})
+			content := strings.TrimSpace(aiRunURLPattern.ReplaceAllString(message.reply.Message,
+				"the actual URL MiniDock shows after startup"))
+			if content == "" {
+				content = "I found the image and its startup command. Reply yes to start it, or tell me what you want changed."
+			}
+			if message.reply.ContainerPort != nil {
+				content += " MiniDock assigns the host port automatically and shows the actual URL after the app is ready."
+			}
+			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: content})
 			m.aiFocus = 1
 		}
 	case aiThinkingTickMsg:
@@ -467,7 +482,8 @@ func (m appModel) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.openAIBuildForm()
 		case "r":
 			m.loading = true
-			return m, m.fetchOverview()
+			m.errText, m.notice = "", ""
+			return m, m.fetchOverview(true)
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "enter":
@@ -482,7 +498,8 @@ func (m appModel) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.openAIBuildForm()
 			case 4:
 				m.loading = true
-				return m, m.fetchOverview()
+				m.errText, m.notice = "", ""
+				return m, m.fetchOverview(true)
 			case 5:
 				return m, tea.Quit
 			}
@@ -517,7 +534,8 @@ func (m appModel) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "r":
 			m.loading = true
-			return m, m.fetchOverview()
+			m.errText, m.notice = "", ""
+			return m, m.fetchOverview(true)
 		}
 	case screenContainers:
 		switch name {
@@ -550,7 +568,8 @@ func (m appModel) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "r":
 			m.loading = true
-			return m, m.fetchOverview()
+			m.errText, m.notice = "", ""
+			return m, m.fetchOverview(true)
 		case "n":
 			m.screen, m.selected = screenImages, 0
 		}
@@ -732,7 +751,7 @@ func (m appModel) handleAIBuildKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *appModel) openAIBuildForm() {
 	m.screen, m.aiFields, m.aiFocus = screenAIBuild, [2]string{}, 0
 	m.aiFocus = 1
-	m.aiMessages, m.aiPlan, m.aiImageName = nil, nil, ""
+	m.aiMessages, m.aiPlan, m.aiImageName = []chatMessage{{role: "assistant", content: "Hi, I’m Docker AI. Tell me what you want to do. I can build a MiniDock image from a supported frontend or backend project, create and run a container from a staged image, check its app port and give you the URL, or help explain a project or build error. I’ll ask for a project folder or other details when I need them."}}, nil, ""
 	m.aiRunPlan = nil
 	m.aiSelected, m.aiPending = 0, false
 	m.errText, m.notice = "", ""
@@ -983,7 +1002,10 @@ func replaceEnv(environment []string, name, value string) []string {
 
 func (m *appModel) clampSelection() {
 	count := len(m.images)
-	if m.screen == screenContainers || m.screen == screenDetails {
+	switch m.screen {
+	case screenHome:
+		count = 6
+	case screenContainers, screenDetails:
 		count = len(m.containers)
 	}
 	if count == 0 {
@@ -993,17 +1015,18 @@ func (m *appModel) clampSelection() {
 	}
 }
 
-func (m appModel) fetchOverview() tea.Cmd {
+func (m appModel) fetchOverview(manual ...bool) tea.Cmd {
 	return func() tea.Msg {
+		manualRefresh := len(manual) > 0 && manual[0]
 		var images []string
 		if err := apiRequest(m.apiURL, http.MethodGet, "/api/v1/images", nil, &images); err != nil {
-			return overviewMsg{err: err}
+			return overviewMsg{err: err, manual: manualRefresh}
 		}
 		var containers []containerView
 		if err := apiRequest(m.apiURL, http.MethodGet, "/api/v1/containers?all=true", nil, &containers); err != nil {
-			return overviewMsg{err: err}
+			return overviewMsg{err: err, manual: manualRefresh}
 		}
-		return overviewMsg{images: images, containers: containers}
+		return overviewMsg{images: images, containers: containers, manual: manualRefresh}
 	}
 }
 
@@ -1180,7 +1203,7 @@ func (m appModel) View() string {
 			mutedStyle.Render("Images"), infoStyle.Render(fmt.Sprint(len(m.images))),
 			mutedStyle.Render("Running"), goodStyle.Render(fmt.Sprint(m.runningContainerCount()))))
 		out.WriteString(fmt.Sprintf("  %s  %s\n\n", mutedStyle.Render("Container records"), infoStyle.Render(fmt.Sprint(len(m.containers)))))
-		options := []string{"Containers", "Images", "Run a container", "Build image with AI", "Refresh", "Close dashboard"}
+		options := []string{"Containers", "Images", "Run a container", "Work With Docker AI", "Refresh", "Close dashboard"}
 		for index, item := range options {
 			marker := "  "
 			style := optionStyle
@@ -1189,7 +1212,7 @@ func (m appModel) View() string {
 			}
 			out.WriteString("  " + style.Render(marker+item) + "\n")
 		}
-		out.WriteString("\n" + mutedStyle.Render("  ↑/↓ navigate · Enter select · i images · c containers · n run · b AI build · r refresh · q close"))
+		out.WriteString("\n" + mutedStyle.Render("  ↑/↓ navigate · Enter select · i images · c containers · n run · b Docker AI · r refresh · q close"))
 	case screenImages:
 		out.WriteString(brandStyle.Render("  SELECT AN IMAGE TO RUN") + "\n")
 		out.WriteString(mutedStyle.Render("  Selecting an image starts a new container from it.") + "\n\n")
@@ -1237,8 +1260,8 @@ func (m appModel) View() string {
 		}
 		out.WriteString("\n" + mutedStyle.Render("  Enter details · s stop · d permanently delete · n run · r refresh · Esc back"))
 	case screenAIBuild:
-		out.WriteString(brandStyle.Render("  BUILD AN IMAGE WITH AI") + "\n")
-		out.WriteString(mutedStyle.Render("  Chat with MiniDock about this project. It can explain the app, ask questions, and suggest a supported image build.") + "\n\n")
+		out.WriteString(brandStyle.Render("  WORK WITH DOCKER AI") + "\n")
+		out.WriteString(mutedStyle.Render("  Describe what you want in chat. Docker AI guides the request; MiniDock performs supported build and run actions.") + "\n\n")
 		pathMarker, pathStyle := "  ", optionStyle
 		if m.aiFocus == 0 {
 			pathMarker, pathStyle = "▸ ", selectedStyle
@@ -1250,9 +1273,7 @@ func (m appModel) View() string {
 		out.WriteString("  " + pathStyle.Render(pathMarker+"Project folder: "+projectPath) + "\n\n")
 		chatWidth := max(32, m.width-8)
 		var transcript strings.Builder
-		if len(m.aiMessages) == 0 {
-			transcript.WriteString(mutedStyle.Render("Tell me what you want to build, or ask me to explain this project."))
-		} else {
+		if len(m.aiMessages) > 0 {
 			start := max(0, len(m.aiMessages)-8)
 			userName := strings.TrimSpace(os.Getenv("SUDO_USER"))
 			if userName == "" {
@@ -1281,7 +1302,7 @@ func (m appModel) View() string {
 		}
 		input := m.aiFields[1]
 		if input == "" && !m.aiPending {
-			input = "Write a message…"
+			input = "What would you like Docker AI to do?"
 		}
 		if m.aiPending {
 			frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
