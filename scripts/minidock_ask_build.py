@@ -383,7 +383,7 @@ def validate_plan(value, profile, image_name, project_dir):
 
 def request_turn(messages, image_name, profile, project_dir, api_key, model=None, opener=urllib.request.urlopen, staged_images=None):
     system = (
-        "You are MiniDock's image build and run guide. MiniDock is a deliberately small Linux rootfs image builder and runtime, not Docker/OCI. "
+        "You are MiniDock's conversational guide for building and running local images. MiniDock is a deliberately small Linux rootfs image builder and runtime, not Docker/OCI. "
         "Current source adapters are Vite and Angular static sites, Go main packages compiled as CGO-disabled Linux binaries, Maven "
         "executable JARs bundled with a jlink Java runtime, self-contained Linux C# projects, and simple Python script apps bundled with PyInstaller. Images need a compatible Linux "
         "kernel at run time; the host does not need the language runtime when it is bundled in the image. Explain the detected app "
@@ -391,6 +391,11 @@ def request_turn(messages, image_name, profile, project_dir, api_key, model=None
         "for this project from most suitable to least suitable. The first option is the recommended recipe and will be used "
         "after the user replies yes in chat. Do not tell the user to select from a list or use a separate confirmation prompt. "
         "The IDs are fixed local recipes, not commands. "
+        "The user should describe their goal in ordinary language. Ask one brief follow-up question when the project, image, "
+        "startup command, or port needed for a supported action is unclear. For a supported build or run request, return a "
+        "structured plan so the MiniDock interface can perform it; do not ask the user to type terminal commands. "
+        "Only MiniDock's fixed local adapters and runtime handlers may perform actions. Never invent shell commands, Dockerfiles, "
+        "build scripts, or unsupported capabilities. "
         "If the user asks to run or start an image, use a run plan only when its exact name is in staged_images and its startup "
         "command is known from the supplied project profile or explicitly provided by the user. Never claim it was started: "
         "MiniDock requires an explicit yes from the user in chat before starting it. If its command is unknown, ask the user for its executable and arguments. "
@@ -401,8 +406,9 @@ def request_turn(messages, image_name, profile, project_dir, api_key, model=None
         "If available_options is empty, do not propose a build; explain that no source build adapter matches this folder. "
         "If the user asks for an explanation or advice without asking for a build or run plan, answer helpfully in plain language. "
         "If their goals or project context are unclear, ask one concise useful follow-up question instead of guessing. "
-        "You do not execute anything yourself. MiniDock's local adapters build images, and the dashboard can start staged images "
-        "after the user replies yes to a run proposal in chat. Never tell users that MiniDock cannot run images and never suggest Docker syntax. "
+        "You do not execute anything yourself. MiniDock's local adapters build images, and the runtime handler can start staged images "
+        "after the user replies yes to a run proposal in chat. Never claim an action completed before MiniDock reports success. "
+        "Never tell users to run commands for a supported MiniDock action, never claim MiniDock cannot run its images, and never suggest Docker syntax. "
         "Return only JSON, with exactly the listed keys, in one of four forms: "
         "{kind: message, message: string}, {kind: question, question: string}, or "
         "{kind: plan, summary: string, recommended_order: array}, or "
@@ -591,18 +597,6 @@ def main():
             image_name = re.sub(r"[^A-Za-z0-9._-]+", "-", profile["project_name"]).strip(".-_")[:128]
             if not image_name:
                 image_name = "minidock-image"
-        last_message = messages[-1]["content"]
-        known_command = profile.get("run_command")
-        if (staged_images and known_command and image_name in staged_images
-                and re.search(r"\b(run|start|launch|execute)\b", last_message, re.IGNORECASE)):
-            print(json.dumps({
-                "kind": "run",
-                "image": image_name,
-                "command": known_command,
-                "container_port": profile.get("default_port"),
-                "project_dir": project_dir.as_posix(),
-            }, separators=(",", ":")))
-            return
         api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if not api_key:
             fail("OPENROUTER_API_KEY is missing; add it to the repository .env file or export it in your shell")
