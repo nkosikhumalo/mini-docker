@@ -66,6 +66,10 @@ def payment_error(error):
         detail, reason = "", ""
     if reason == "in_flight_budget_exhausted":
         return "OpenRouter temporarily exhausted this key's concurrent request budget (HTTP 402). Wait briefly, then retry."
+    if error.code == 401:
+        suffix = f" OpenRouter said: {detail[:300]}" if detail else ""
+        return ("OpenRouter rejected the API key (HTTP 401). Check that the key in the local .env file is current and belongs "
+                "to an active OpenRouter account. MiniDock does not display or send the key anywhere except OpenRouter." + suffix)
     if error.code == 402:
         suffix = f" OpenRouter said: {detail[:300]}" if detail else ""
         return ("OpenRouter returned HTTP 402: the key may have a spending limit or the account may need credits. "
@@ -384,10 +388,12 @@ def request_turn(messages, image_name, profile, project_dir, api_key, model=None
         "executable JARs bundled with a jlink Java runtime, self-contained Linux C# projects, and simple Python script apps bundled with PyInstaller. Images need a compatible Linux "
         "kernel at run time; the host does not need the language runtime when it is bundled in the image. Explain the detected app "
         "in plain language and rank all available option IDs "
-        "for this project from most suitable to least suitable. The IDs are fixed local recipes, not commands. "
+        "for this project from most suitable to least suitable. The first option is the recommended recipe and will be used "
+        "after the user replies yes in chat. Do not tell the user to select from a list or use a separate confirmation prompt. "
+        "The IDs are fixed local recipes, not commands. "
         "If the user asks to run or start an image, use a run plan only when its exact name is in staged_images and its startup "
         "command is known from the supplied project profile or explicitly provided by the user. Never claim it was started: "
-        "MiniDock requires confirmation before starting it. If its command is unknown, ask the user for its executable and arguments. "
+        "MiniDock requires an explicit yes from the user in chat before starting it. If its command is unknown, ask the user for its executable and arguments. "
         "For the matching project image, use the profile's actual run_command; include its default_port when the user wants a reachable app. "
         "For other images, never guess a command or app port. "
         "If a user says an image already exists and its name is staged, do not suggest rebuilding it; briefly explain it is available "
@@ -396,7 +402,7 @@ def request_turn(messages, image_name, profile, project_dir, api_key, model=None
         "If the user asks for an explanation or advice without asking for a build or run plan, answer helpfully in plain language. "
         "If their goals or project context are unclear, ask one concise useful follow-up question instead of guessing. "
         "You do not execute anything yourself. MiniDock's local adapters build images, and the dashboard can start staged images "
-        "after the user confirms a run proposal. Never tell users that MiniDock cannot run images and never suggest Docker syntax. "
+        "after the user replies yes to a run proposal in chat. Never tell users that MiniDock cannot run images and never suggest Docker syntax. "
         "Return only JSON, with exactly the listed keys, in one of four forms: "
         "{kind: message, message: string}, {kind: question, question: string}, or "
         "{kind: plan, summary: string, recommended_order: array}, or "
@@ -547,7 +553,6 @@ def main():
                 fail("chat messages must alternate user and assistant text and stay within 2000 characters")
         if messages[-1]["role"] != "user":
             fail("the last chat message must be from the user")
-        selected_project = None
         try:
             profile = inspect_project(project)
             project_dir = project
@@ -574,7 +579,6 @@ def main():
                     }, separators=(",", ":")))
                     return
             else:
-                selected_project = selected
                 project_dir = (project / selected).resolve()
                 try:
                     profile = inspect_project(project_dir)
@@ -588,29 +592,6 @@ def main():
             if not image_name:
                 image_name = "minidock-image"
         last_message = messages[-1]["content"]
-        folder_question_was_asked = any(
-            message.get("role") == "assistant"
-            and "which one would you like to build" in message.get("content", "").casefold()
-            for message in messages[:-1]
-        )
-        if selected_project and folder_question_was_asked:
-            builder_names = {
-                "vite-static": "a Vite frontend",
-                "angular-static": "an Angular frontend",
-                "go-binary": "a Go application",
-                "maven-java": "a Maven Java application",
-                "dotnet-self-contained": "a C# application",
-                "python-script": "a Python script app",
-            }
-            summary = (f"I found {builder_names.get(profile['detected_builder'], 'a supported app')} in "
-                       f"{selected_project}. Choose a local build option below to create the image.")
-            plan = validate_plan({
-                "kind": "plan",
-                "summary": summary,
-                "recommended_order": profile["available_options"],
-            }, profile, image_name, project_dir.as_posix())
-            print(json.dumps(plan, separators=(",", ":")))
-            return
         known_command = profile.get("run_command")
         if (staged_images and known_command and image_name in staged_images
                 and re.search(r"\b(run|start|launch|execute)\b", last_message, re.IGNORECASE)):
