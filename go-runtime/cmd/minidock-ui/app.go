@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -143,8 +144,6 @@ type appModel struct {
 	aiSelected         int
 	aiPending          bool
 	aiThinkingFrame    int
-	aiConfirm          bool
-	aiRunConfirm       bool
 	buildSession       *buildSession
 	buildLogs          []string
 	buildDone          bool
@@ -201,6 +200,9 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 							if container.PortReady {
 								m.notice += fmt.Sprintf(" · App port %d → localhost:%d · Open http://127.0.0.1:%d",
 									*container.ContainerPort, *container.PublishedPort, *container.PublishedPort)
+								if m.screen == screenAIBuild {
+									m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: fmt.Sprintf("It’s running. App port %d is available at http://127.0.0.1:%d.", *container.ContainerPort, *container.PublishedPort)})
+								}
 								m.pendingStartID = ""
 							} else {
 								m.notice += fmt.Sprintf(" · App port %d → localhost:%d (waiting for HTTP response)",
@@ -209,6 +211,9 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 							}
 						} else {
 							m.notice += " · no app port is configured in this image"
+							if m.screen == screenAIBuild {
+								m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "It’s running, but this image doesn’t declare a web port. You can still interact with it as a container; tell me if you want to expose a port."})
+							}
 							m.pendingStartID = ""
 						}
 					} else if isActiveStatus(container.Status) {
@@ -220,6 +225,9 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 							m.notice += fmt.Sprintf(", exit code %d", *container.ExitCode)
 						}
 						m.notice += "). Open Containers, select it, then press Enter for details or l for logs."
+						if m.screen == screenAIBuild {
+							m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "The container stopped before becoming ready (" + strings.ToUpper(container.Status) + "). You can ask me to inspect its logs or adjust how it starts."})
+						}
 					}
 					if !strings.EqualFold(container.Status, "RUNNING") {
 						m.pendingStartID = ""
@@ -238,9 +246,13 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.errText = ""
 		switch message.action {
 		case "created":
-			m.screen = screenHome
 			m.pendingStartID = message.container.ID
 			m.notice = "Checking container " + message.container.ID + " startup…"
+			if m.screen == screenAIBuild {
+				m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "Container " + message.container.ID + " was created. I’m checking that it starts and that its app port responds."})
+			} else {
+				m.screen = screenHome
+			}
 			return m, m.fetchOverview()
 		case "stopped":
 			m.notice = "Container stopped: " + message.container.ID
@@ -282,17 +294,20 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: message.reply.Message})
 			m.aiFocus = 1
 		} else if message.reply.Kind == "plan" {
-			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: message.reply.Summary})
+			recommendation := ""
+			if len(message.reply.Options) > 0 {
+				recommendation = "\n\nRecommended build: " + message.reply.Options[0].Title + ". Reply yes to build it, or tell me what you want changed."
+			}
+			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: message.reply.Summary + recommendation})
 			m.aiPlan = &buildPlan{Summary: message.reply.Summary, Options: message.reply.Options}
 			m.aiImageName = message.reply.ImageName
 			m.aiSelected = 0
-			m.aiFocus = 0
+			m.aiFocus = 1
 		} else if message.reply.Kind == "run" {
 			m.aiRunPlan = &aiRunPlan{Image: message.reply.Image, Command: message.reply.Command,
 				ContainerPort: message.reply.ContainerPort}
-			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "I found a staged image and a startup command. Review the launch details below."})
-			m.aiRunConfirm = true
-			m.aiFocus = 0
+			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "I found the image and its startup command. Reply yes to start it, or tell me what you want changed."})
+			m.aiFocus = 1
 		}
 	case aiThinkingTickMsg:
 		if m.aiPending {
@@ -300,7 +315,7 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tickAIThinking()
 		}
 	case aiBuildMsg:
-		m.busy, m.aiConfirm = false, false
+		m.busy = false
 		if message.err != nil {
 			m.errText = "Image build failed: " + message.err.Error()
 			return m, nil
@@ -343,6 +358,21 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.buildPath = event.path
 					if event.err != nil {
 						m.buildErr = event.err.Error()
+						m.screen = screenAIBuild
+						m.aiPlan = nil
+						m.aiFocus = 1
+						m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "The image build failed: " + event.err.Error() + "\n\nTell me what you want to try next, or ask me to explain the error."})
+					} else {
+						m.screen = screenAIBuild
+						m.aiPlan = nil
+						m.aiFocus = 1
+						m.images = append(m.images, m.aiImageName)
+						content := "Built and staged image " + m.aiImageName + " successfully."
+						if event.path != "" {
+							content += "\nSaved at: " + event.path
+						}
+						content += "\n\nWhat would you like to do next? You can ask me to run this image or make another build."
+						m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: content})
 					}
 					return m, m.fetchOverview()
 				}
@@ -669,49 +699,6 @@ func (m appModel) handleAIBuildKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.busy && !m.aiPending {
 		return m, nil
 	}
-	if m.aiRunConfirm {
-		switch key.String() {
-		case "y", "Y", "enter":
-			m.aiRunConfirm, m.busy = false, true
-			return m, m.createAIPlannedContainer()
-		case "n", "N", "esc":
-			m.aiRunConfirm, m.aiRunPlan = false, nil
-			m.aiFocus = 1
-		}
-		return m, nil
-	}
-	if m.aiConfirm {
-		switch key.String() {
-		case "y", "Y", "enter":
-			m.aiConfirm, m.busy = false, true
-			return m, m.buildAIImage()
-		case "n", "N", "esc":
-			m.aiConfirm = false
-		}
-		return m, nil
-	}
-	if m.aiPlan != nil && m.aiFocus == 0 {
-		switch key.String() {
-		case "up", "k":
-			if len(m.aiPlan.Options) > 0 {
-				m.aiSelected = (m.aiSelected - 1 + len(m.aiPlan.Options)) % len(m.aiPlan.Options)
-			}
-			return m, nil
-		case "down", "j":
-			if len(m.aiPlan.Options) > 0 {
-				m.aiSelected = (m.aiSelected + 1) % len(m.aiPlan.Options)
-			}
-			return m, nil
-		case "enter":
-			if len(m.aiPlan.Options) > 0 {
-				m.aiConfirm = true
-			}
-			return m, nil
-		case "tab":
-			m.aiFocus = 1
-			return m, nil
-		}
-	}
 	switch key.String() {
 	case "esc":
 		m.screen, m.errText = screenHome, ""
@@ -746,8 +733,8 @@ func (m *appModel) openAIBuildForm() {
 	m.screen, m.aiFields, m.aiFocus = screenAIBuild, [2]string{}, 0
 	m.aiFocus = 1
 	m.aiMessages, m.aiPlan, m.aiImageName = nil, nil, ""
-	m.aiRunPlan, m.aiRunConfirm = nil, false
-	m.aiSelected, m.aiPending, m.aiConfirm = 0, false, false
+	m.aiRunPlan = nil
+	m.aiSelected, m.aiPending = 0, false
 	m.errText, m.notice = "", ""
 }
 
@@ -764,11 +751,44 @@ func (m appModel) submitAIChat() (tea.Model, tea.Cmd) {
 		m.errText = "Keep each message to 2,000 characters or less."
 		return m, nil
 	}
-	m.aiFields[1] = ""
 	m.aiMessages = append(m.aiMessages, chatMessage{role: "user", content: message})
+	m.aiFields[1] = ""
+	if m.aiPlan != nil && affirmativeReply(message, false) {
+		m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "Okay, I’m starting the recommended local build now."})
+		m.aiPending, m.busy, m.aiFocus = false, true, 1
+		return m, m.buildAIImage()
+	}
+	if m.aiRunPlan != nil && affirmativeReply(message, true) {
+		m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "Okay, I’m starting that container now."})
+		m.aiPending, m.busy, m.aiFocus = false, true, 1
+		return m, m.createAIPlannedContainer()
+	}
 	m.aiPlan, m.aiRunPlan, m.errText = nil, nil, ""
 	m.aiPending, m.busy, m.aiThinkingFrame = true, true, 0
 	return m, m.requestAITurn()
+}
+
+func affirmativeReply(message string, run bool) bool {
+	value := strings.ToLower(strings.TrimSpace(message))
+	value = strings.Join(strings.FieldsFunc(value, func(character rune) bool {
+		return unicode.IsPunct(character) || unicode.IsSpace(character)
+	}), " ")
+	switch value {
+	case "yes", "yeah", "yep", "sure", "okay", "ok", "go ahead", "do it", "please do":
+		return true
+	}
+	if run {
+		switch value {
+		case "start it", "run it", "yes start it", "yes run it", "yes please start it", "yes please run it":
+			return true
+		}
+	} else {
+		switch value {
+		case "build it", "yes build it", "yes please build it", "build the image", "yes build the image", "go build it":
+			return true
+		}
+	}
+	return false
 }
 
 func (m appModel) requestAITurn() tea.Cmd {
@@ -1246,13 +1266,10 @@ func (m appModel) View() string {
 		out.WriteString(composerStyle.Render(composerMarker+"› "+input) + "\n")
 		if m.aiPlan != nil {
 			out.WriteString("\n" + mutedStyle.Render("  Suggested image name: ") + infoStyle.Render(m.aiImageName) + "\n")
-			for index, option := range m.aiPlan.Options {
-				marker, style := "  ", optionStyle
-				if index == m.aiSelected {
-					marker, style = "▸ ", selectedStyle
-				}
-				out.WriteString("  " + style.Render(marker+clean(option.Title)) + "\n")
-				out.WriteString(mutedStyle.Render("     "+clean(option.Description)) + "\n")
+			if len(m.aiPlan.Options) > 0 {
+				option := m.aiPlan.Options[0]
+				out.WriteString("  " + selectedStyle.Render("Recommended: "+clean(option.Title)) + "\n")
+				out.WriteString(mutedStyle.Render("  "+clean(option.Description)) + "\n")
 			}
 		}
 		if m.aiRunPlan != nil {
@@ -1261,19 +1278,11 @@ func (m appModel) View() string {
 			if m.aiRunPlan.ContainerPort != nil {
 				out.WriteString("  App port: " + infoStyle.Render(fmt.Sprint(*m.aiRunPlan.ContainerPort)) + " (MiniDock assigns a localhost address)\n")
 			}
-			if m.aiRunConfirm {
-				out.WriteString("\n" + goodStyle.Render("  Start this container? Press y/Enter to start or n to cancel."))
-			} else if m.busy {
-				out.WriteString("\n" + infoStyle.Render("  Starting the approved container…"))
+			if m.busy {
+				out.WriteString("\n" + infoStyle.Render("  Starting the container…"))
 			}
 		}
-		if m.aiConfirm && m.aiPlan != nil && m.aiSelected < len(m.aiPlan.Options) {
-			out.WriteString("\n" + goodStyle.Render("  Build "+m.aiImageName+" using "+m.aiPlan.Options[m.aiSelected].Title+"? Press y to confirm or n to cancel."))
-		} else if m.aiPlan != nil {
-			out.WriteString("\n" + mutedStyle.Render("  ↑/↓ choose recipe · Enter review and confirm · Tab chat again · Esc back"))
-		} else {
-			out.WriteString("\n" + mutedStyle.Render("  Enter send · Tab project folder · Ctrl+S send · Esc back"))
-		}
+		out.WriteString("\n" + mutedStyle.Render("  Enter send · Tab project folder · Ctrl+S send · Esc back"))
 	case screenBuildProgress:
 		if !m.buildDone {
 			frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
