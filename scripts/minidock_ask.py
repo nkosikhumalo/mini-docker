@@ -50,6 +50,10 @@ def payment_error(error):
         detail, reason = "", ""
     if reason == "in_flight_budget_exhausted":
         return "OpenRouter temporarily exhausted this key's concurrent request budget (HTTP 402). Wait briefly, then retry."
+    if error.code == 401:
+        suffix = f" OpenRouter said: {detail[:300]}" if detail else ""
+        return ("OpenRouter rejected the API key (HTTP 401). Check that the key in the local .env file is current and belongs "
+                "to an active OpenRouter account. MiniDock does not display or send the key anywhere except OpenRouter." + suffix)
     if error.code == 402:
         suffix = f" OpenRouter said: {detail[:300]}" if detail else ""
         return ("OpenRouter returned HTTP 402: the key may have a spending limit or the account may need credits. "
