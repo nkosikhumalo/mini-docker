@@ -278,7 +278,7 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.err != nil {
 			m.errText = message.err.Error()
 			if len(m.aiMessages) > 0 && m.aiMessages[len(m.aiMessages)-1].role == "user" {
-				m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "I couldn't get a response from OpenRouter. Your message is still in the chat; check the error above, then send another message when ready."})
+				m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "I couldn't complete that request. The error is shown above; your message is still here, so you can retry or rephrase it."})
 			}
 			m.aiFocus = 1
 			return m, nil
@@ -833,15 +833,41 @@ func (m appModel) requestAITurn() tea.Cmd {
 		}
 		if reply.Kind == "question" && strings.TrimSpace(reply.Question) != "" ||
 			reply.Kind == "message" && strings.TrimSpace(reply.Message) != "" ||
-			reply.Kind == "plan" && len(reply.Options) > 0 && reply.ImageName != "" && reply.ProjectDir != "" {
+			reply.Kind == "plan" && len(reply.Options) > 0 && reply.ImageName != "" && reply.ProjectDir != "" ||
+			validAIRunReply(reply, images) {
 			return aiTurnMsg{reply: reply}
 		}
+		if reply.Kind == "run" {
+			return aiTurnMsg{err: errors.New("AI returned an invalid run proposal: the image must be staged and the startup command and port must be valid")}
+		}
 		if reply.Kind != "question" && reply.Kind != "message" && reply.Kind != "plan" {
-			return aiTurnMsg{err: errors.New("AI response was missing a question or supported build plan")}
+			return aiTurnMsg{err: errors.New("AI response was missing a question, message, build plan, or run proposal")}
 		}
 		return aiTurnMsg{err: errors.New("AI returned an empty response or unsupported build plan")}
 	}
 	return tea.Batch(request, tickAIThinking())
+}
+
+func validAIRunReply(reply aiBuildReply, images []string) bool {
+	if reply.Kind != "run" || strings.TrimSpace(reply.Image) == "" || len(reply.Command) == 0 || len(reply.Command) > 32 {
+		return false
+	}
+	staged := false
+	for _, image := range images {
+		if image == reply.Image {
+			staged = true
+			break
+		}
+	}
+	if !staged {
+		return false
+	}
+	for _, argument := range reply.Command {
+		if argument == "" || len(argument) > 4096 || strings.IndexByte(argument, 0) >= 0 {
+			return false
+		}
+	}
+	return reply.ContainerPort == nil || (*reply.ContainerPort >= 1 && *reply.ContainerPort <= 65535)
 }
 
 func tickAIThinking() tea.Cmd {
