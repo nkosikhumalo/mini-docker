@@ -84,6 +84,7 @@ type aiRunPlan struct {
 }
 
 var aiRunURLPattern = regexp.MustCompile(`https?://[^\s]+`)
+var directRunRequestPattern = regexp.MustCompile(`\b(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:run|start|launch)\b|\bplease\s+(?:run|start|launch)\b|\b(?:i want you to|i'd like you to|id like you to)\s+(?:run|start|launch)\b|^(?:(?:hi|hii|hello|hey|ok|okay|bro)[,!.:\s]+)*(?:run|start|launch)\s+(?:the|this|my|image|container|[a-z0-9][a-z0-9._-]*)\b`)
 
 type aiTurnMsg struct {
 	reply aiBuildReply
@@ -316,13 +317,22 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			content := strings.TrimSpace(aiRunURLPattern.ReplaceAllString(message.reply.Message,
 				"the actual URL MiniDock shows after startup"))
 			if content == "" {
-				content = "I found the image and its startup command. Reply yes to start it, or tell me what you want changed."
+				content = "MiniDock is starting this staged image using its saved startup details."
 			}
 			if message.reply.ContainerPort != nil {
 				content += " MiniDock assigns the host port automatically and shows the actual URL after the app is ready."
+			} else {
+				content += " MiniDock will check the image's saved app-port details and show the actual URL if it exposes a web app."
 			}
 			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: content})
 			m.aiFocus = 1
+			if isDirectRunRequest(lastUserChatMessage(m.aiMessages)) {
+				m.notice = "Starting container from image " + message.reply.Image + "…"
+				m.busy = true
+				command := m.createAIPlannedContainer()
+				m.aiRunPlan = nil
+				return m, command
+			}
 		}
 	case aiThinkingTickMsg:
 		if m.aiPending {
@@ -857,7 +867,7 @@ func (m appModel) requestAITurn() tea.Cmd {
 			return aiTurnMsg{reply: reply}
 		}
 		if reply.Kind == "run" {
-			return aiTurnMsg{err: errors.New("AI returned an invalid run proposal: the image must be staged and the startup command and port must be valid")}
+			return aiTurnMsg{err: errors.New("AI returned an invalid run proposal: the image must be staged and any supplied port must be valid")}
 		}
 		if reply.Kind != "question" && reply.Kind != "message" && reply.Kind != "plan" {
 			return aiTurnMsg{err: errors.New("AI response was missing a question, message, build plan, or run proposal")}
@@ -868,7 +878,7 @@ func (m appModel) requestAITurn() tea.Cmd {
 }
 
 func validAIRunReply(reply aiBuildReply, images []string) bool {
-	if reply.Kind != "run" || strings.TrimSpace(reply.Image) == "" || len(reply.Command) == 0 || len(reply.Command) > 32 {
+	if reply.Kind != "run" || strings.TrimSpace(reply.Image) == "" || len(reply.Command) > 32 {
 		return false
 	}
 	staged := false
@@ -887,6 +897,25 @@ func validAIRunReply(reply aiBuildReply, images []string) bool {
 		}
 	}
 	return reply.ContainerPort == nil || (*reply.ContainerPort >= 1 && *reply.ContainerPort <= 65535)
+}
+
+func lastUserChatMessage(messages []chatMessage) string {
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].role == "user" {
+			return messages[index].content
+		}
+	}
+	return ""
+}
+
+func isDirectRunRequest(message string) bool {
+	value := strings.ToLower(strings.TrimSpace(message))
+	for _, prefix := range []string{"how ", "is it possible", "can it ", "could it ", "would it "} {
+		if strings.HasPrefix(value, prefix) {
+			return false
+		}
+	}
+	return directRunRequestPattern.MatchString(value)
 }
 
 func tickAIThinking() tea.Cmd {
