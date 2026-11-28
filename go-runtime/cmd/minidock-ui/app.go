@@ -1446,24 +1446,6 @@ func (m appModel) View() string {
 		}
 		composerStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(composerColor).Padding(0, 1).Width(chatWidth)
 		out.WriteString(composerStyle.Render(composerMarker+"› "+input) + "\n")
-		if m.aiPlan != nil {
-			out.WriteString("\n" + mutedStyle.Render("  Suggested image name: ") + infoStyle.Render(m.aiImageName) + "\n")
-			if len(m.aiPlan.Options) > 0 {
-				option := m.aiPlan.Options[0]
-				out.WriteString("  " + selectedStyle.Render("Recommended: "+clean(option.Title)) + "\n")
-				out.WriteString(mutedStyle.Render("  "+clean(option.Description)) + "\n")
-			}
-		}
-		if m.aiRunPlan != nil {
-			out.WriteString("\n" + brandStyle.Render("  LAUNCH PROPOSAL") + "\n")
-			out.WriteString("  Image:   " + infoStyle.Render(clean(m.aiRunPlan.Image)) + "\n")
-			if m.aiRunPlan.ContainerPort != nil {
-				out.WriteString("  App port: " + infoStyle.Render(fmt.Sprint(*m.aiRunPlan.ContainerPort)) + " (MiniDock assigns a localhost address)\n")
-			}
-			if m.busy {
-				out.WriteString("\n" + infoStyle.Render("  Starting the container…"))
-			}
-		}
 		out.WriteString("\n" + mutedStyle.Render("  Enter send · Tab project folder · Ctrl+S send · Esc back"))
 	case screenBuildProgress:
 		if !m.buildDone {
