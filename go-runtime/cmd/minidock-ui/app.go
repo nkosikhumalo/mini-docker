@@ -85,6 +85,7 @@ type aiRunPlan struct {
 
 var aiRunURLPattern = regexp.MustCompile(`https?://[^\s]+`)
 var directRunRequestPattern = regexp.MustCompile(`\b(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:run|start|launch)\b|\bplease\s+(?:run|start|launch)\b|\b(?:i want you to|i'd like you to|id like you to)\s+(?:run|start|launch)\b|^(?:(?:hi|hii|hello|hey|ok|okay|bro)[,!.:\s]+)*(?:run|start|launch)\s+(?:the|this|my|image|container|[a-z0-9][a-z0-9._-]*)\b`)
+var imageMentionTokenPattern = regexp.MustCompile(`[a-z0-9][a-z0-9._-]*`)
 
 type aiTurnMsg struct {
 	reply aiBuildReply
@@ -145,6 +146,8 @@ type appModel struct {
 	aiMessages         []chatMessage
 	aiPlan             *buildPlan
 	aiRunPlan          *aiRunPlan
+	pendingRunIntent   bool
+	matchedRunImage    string
 	aiImageName        string
 	aiSelected         int
 	aiPending          bool
@@ -284,6 +287,7 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case aiTurnMsg:
 		m.aiPending, m.busy = false, false
 		if message.err != nil {
+			m.pendingRunIntent, m.matchedRunImage = false, ""
 			m.errText = message.err.Error()
 			if len(m.aiMessages) > 0 && m.aiMessages[len(m.aiMessages)-1].role == "user" {
 				m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "I couldn't complete that request. The error is shown above; your message is still here, so you can retry or rephrase it."})
@@ -297,9 +301,12 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if message.reply.Kind == "question" {
 			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: message.reply.Question})
+			m.pendingRunIntent = m.pendingRunIntent && strings.Contains(strings.ToLower(message.reply.Question), "image")
+			m.matchedRunImage = ""
 			m.aiFocus = 1
 		} else if message.reply.Kind == "message" {
 			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: message.reply.Message})
+			m.pendingRunIntent, m.matchedRunImage = false, ""
 			m.aiFocus = 1
 		} else if message.reply.Kind == "plan" {
 			recommendation := ""
@@ -310,6 +317,7 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.aiPlan = &buildPlan{Summary: message.reply.Summary, Options: message.reply.Options}
 			m.aiImageName = message.reply.ImageName
 			m.aiSelected = 0
+			m.pendingRunIntent, m.matchedRunImage = false, ""
 			m.aiFocus = 1
 		} else if message.reply.Kind == "run" {
 			m.aiRunPlan = &aiRunPlan{Image: message.reply.Image, Command: message.reply.Command,
@@ -326,11 +334,11 @@ func (m appModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: content})
 			m.aiFocus = 1
-			if isDirectRunRequest(lastUserChatMessage(m.aiMessages)) {
+			if m.pendingRunIntent || isDirectRunRequest(lastUserChatMessage(m.aiMessages)) {
 				m.notice = "Starting container from image " + message.reply.Image + "…"
 				m.busy = true
 				command := m.createAIPlannedContainer()
-				m.aiRunPlan = nil
+				m.aiRunPlan, m.pendingRunIntent, m.matchedRunImage = nil, false, ""
 				return m, command
 			}
 		}
@@ -763,6 +771,7 @@ func (m *appModel) openAIBuildForm() {
 	m.aiFocus = 1
 	m.aiMessages, m.aiPlan, m.aiImageName = []chatMessage{{role: "assistant", content: "Hi, I’m Docker AI. Tell me what you want to do. I can build a MiniDock image from a supported frontend or backend project, create and run a container from a staged image, check its app port and give you the URL, or help explain a project or build error. I’ll ask for a project folder or other details when I need them."}}, nil, ""
 	m.aiRunPlan = nil
+	m.pendingRunIntent, m.matchedRunImage = false, ""
 	m.aiSelected, m.aiPending = 0, false
 	m.errText, m.notice = "", ""
 }
@@ -780,6 +789,8 @@ func (m appModel) submitAIChat() (tea.Model, tea.Cmd) {
 		m.errText = "Keep each message to 2,000 characters or less."
 		return m, nil
 	}
+	continueRun := m.pendingRunIntent
+	directRun := isDirectRunRequest(message)
 	m.aiMessages = append(m.aiMessages, chatMessage{role: "user", content: message})
 	m.aiFields[1] = ""
 	if m.aiPlan != nil && affirmativeReply(message, false) {
@@ -790,7 +801,18 @@ func (m appModel) submitAIChat() (tea.Model, tea.Cmd) {
 	if m.aiRunPlan != nil && affirmativeReply(message, true) {
 		m.aiMessages = append(m.aiMessages, chatMessage{role: "assistant", content: "Okay, I’m starting that container now."})
 		m.aiPending, m.busy, m.aiFocus = false, true, 1
-		return m, m.createAIPlannedContainer()
+		command := m.createAIPlannedContainer()
+		m.aiRunPlan = nil
+		return m, command
+	}
+	if directRun || continueRun {
+		m.pendingRunIntent = true
+		m.matchedRunImage = ""
+		if image, matched := matchStagedImage(message, m.images); matched {
+			m.matchedRunImage = image
+		}
+	} else {
+		m.pendingRunIntent, m.matchedRunImage = false, ""
 	}
 	m.aiPlan, m.aiRunPlan, m.errText = nil, nil, ""
 	m.aiPending, m.busy, m.aiThinkingFrame = true, true, 0
@@ -835,7 +857,11 @@ func (m appModel) requestAITurn() tea.Cmd {
 	if images == nil {
 		images = []string{}
 	}
-	payload, _ := json.Marshal(map[string]any{"messages": messages, "images": images})
+	payloadData := map[string]any{"messages": messages, "images": images}
+	if m.matchedRunImage != "" {
+		payloadData["matched_image"] = m.matchedRunImage
+	}
+	payload, _ := json.Marshal(payloadData)
 	projectDir := strings.TrimSpace(m.aiFields[0])
 	if projectDir == "" {
 		projectDir = "."
@@ -916,6 +942,86 @@ func isDirectRunRequest(message string) bool {
 		}
 	}
 	return directRunRequestPattern.MatchString(value)
+}
+
+func matchStagedImage(message string, images []string) (string, bool) {
+	if len(images) == 0 {
+		return "", false
+	}
+	message = strings.ToLower(message)
+	tokens := imageMentionTokenPattern.FindAllString(message, -1)
+	for _, image := range images {
+		for _, token := range tokens {
+			if token == strings.ToLower(image) {
+				return image, true
+			}
+		}
+	}
+	var aliasMatch string
+	for _, image := range images {
+		for _, token := range tokens {
+			for _, part := range strings.FieldsFunc(strings.ToLower(image), func(character rune) bool {
+				return character == '-' || character == '_' || character == '.'
+			}) {
+				if token == part {
+					if aliasMatch != "" && aliasMatch != image {
+						return "", false
+					}
+					aliasMatch = image
+				}
+			}
+		}
+	}
+	if aliasMatch != "" {
+		return aliasMatch, true
+	}
+	bestImage, bestScore, secondScore := "", 0.0, 0.0
+	for _, image := range images {
+		name := strings.ToLower(image)
+		for _, token := range tokens {
+			score := imageNameSimilarity(name, token)
+			if score > bestScore {
+				secondScore = bestScore
+				bestImage, bestScore = image, score
+			} else if score > secondScore {
+				secondScore = score
+			}
+		}
+	}
+	if bestScore < 0.80 || bestScore-secondScore < 0.08 {
+		return "", false
+	}
+	return bestImage, true
+}
+
+func imageNameSimilarity(image, token string) float64 {
+	if image == token {
+		return 1
+	}
+	longer, shorter := image, token
+	if len(longer) < len(shorter) {
+		longer, shorter = shorter, longer
+	}
+	if len(longer) == 0 {
+		return 0
+	}
+	previous := make([]int, len(shorter)+1)
+	current := make([]int, len(shorter)+1)
+	for index := range previous {
+		previous[index] = index
+	}
+	for i := 1; i <= len(longer); i++ {
+		current[0] = i
+		for j := 1; j <= len(shorter); j++ {
+			cost := 0
+			if longer[i-1] != shorter[j-1] {
+				cost = 1
+			}
+			current[j] = min(previous[j]+1, current[j-1]+1, previous[j-1]+cost)
+		}
+		previous, current = current, previous
+	}
+	return 1 - float64(previous[len(shorter)])/float64(len(longer))
 }
 
 func tickAIThinking() tea.Cmd {
